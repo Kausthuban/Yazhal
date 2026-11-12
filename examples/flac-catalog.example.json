@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "id": "my-catalog",
+  "name": "Example — replace with your catalog",
+  "searchUrl": "https://catalog.example.org/search?q={query}",
+  "allowedHosts": ["catalog.example.org", "audio.example.org"]
+}

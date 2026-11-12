@@ -1,0 +1,72 @@
+# Dart / Flutter dependency and build output (including vendored packages)
+**/.dart_tool/
+**/.pub/
+**/.pub-cache/
+**/build/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/.packages
+**/doc/api/
+# Keep the application lockfile for reproducible dependency resolution.
+!/pubspec.lock
+
+# Generated localization / plugin files
+/lib/localization/app_*.dart
+/lib/localization/untranslated.json
+/lib/generated_plugin_registrant.dart
+/linux/flutter/generated_plugin_registrant.cc
+/linux/flutter/generated_plugin_registrant.h
+/linux/flutter/generated_plugins.cmake
+/windows/flutter/generated_plugin_registrant.cc
+/windows/flutter/generated_plugin_registrant.h
+/windows/flutter/generated_plugins.cmake
+**/ephemeral/
+
+# Android and native tooling
+**/.gradle/
+**/.cxx/
+**/.externalNativeBuild/
+android/local.properties
+android/captures/
+android/gradlew
+android/gradlew.bat
+android/gradle/wrapper/gradle-wrapper.jar
+**/GeneratedPluginRegistrant.java
+
+# Private signing / environment settings
+**/key.properties
+*.jks
+*.keystore
+.env
+.env.*
+!.env.example
+
+# IDE, OS, temporary and coverage files
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.swp
+*.pyc
+**/__pycache__/
+coverage/
+*.lcov
+app.*.symbols
+app.*.map.json
+
+# Packaged binaries and delivery-only output
+/apk/
+/validation/
+/previews/
+/dist/
+*.apk
+*.aab
+*.ipa
+*.zip
+*.tar.gz
+/SHA256SUMS.txt

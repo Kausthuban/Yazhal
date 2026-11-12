@@ -1,0 +1,32 @@
+name: Bug report
+description: Report a reproducible problem in Yazhal
+labels: [bug]
+body:
+  - type: checkboxes
+    attributes:
+      label: Existing reports
+      options:
+        - label: I searched the existing issues for this problem.
+          required: true
+  - type: input
+    attributes:
+      label: App version or commit
+      description: Include the Yazhal version and, for source builds, the commit.
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Platform and OS version
+      placeholder: Android 16, Windows 11, or your Linux distribution
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Steps to reproduce
+      description: Explain what you did, what happened, and what you expected.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Logs or screenshots
+      description: Attach relevant diagnostic details if available.

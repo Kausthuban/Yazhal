@@ -1,0 +1,1 @@
+Yazhal: renamed application and project identity; existing offline library, metadata, recommendations and optional FLAC features retained.

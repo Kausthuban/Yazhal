@@ -1,0 +1,22 @@
+name: Feature request
+description: Suggest an improvement to Yazhal
+labels: [enhancement]
+body:
+  - type: checkboxes
+    attributes:
+      label: Existing requests
+      options:
+        - label: I searched the existing issues for this suggestion.
+          required: true
+  - type: textarea
+    attributes:
+      label: Problem to solve
+      description: Describe the need and how the app currently behaves.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Suggested behavior
+      description: Explain the proposed improvement and any alternatives.
+    validations:
+      required: true

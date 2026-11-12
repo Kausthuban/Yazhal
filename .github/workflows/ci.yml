@@ -1,0 +1,25 @@
+name: Source checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.9'
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze
+      # These two files need live YouTube responses or a Linux D-Bus session.
+      - name: Run available regression tests
+        shell: bash
+        run: flutter test --no-pub --concurrency=1 $(find test -name '*test.dart' ! -path 'test/fetch_audio_stream_live_test.dart' ! -path 'test/linux/media_controls_test.dart')
