@@ -28,9 +28,11 @@ import 'package:yazhal/constants/app_constants.dart';
 import 'package:yazhal/extensions/l10n.dart';
 import 'package:yazhal/main.dart';
 import 'package:yazhal/services/common_services.dart';
+import 'package:yazhal/services/listening_activity.dart';
 import 'package:yazhal/services/listening_stats_service.dart';
 import 'package:yazhal/services/offline_taste_service.dart';
 import 'package:yazhal/services/playlists_manager.dart';
+import 'package:yazhal/services/provider_router.dart';
 import 'package:yazhal/services/settings_manager.dart';
 import 'package:yazhal/utilities/app_utils.dart';
 import 'package:yazhal/utilities/async_loader.dart';
@@ -40,6 +42,7 @@ import 'package:yazhal/widgets/fast_scroll.dart';
 import 'package:yazhal/widgets/listening_recap_card.dart';
 import 'package:yazhal/widgets/mini_player_bottom_space.dart';
 import 'package:yazhal/widgets/playlist_cube.dart';
+import 'package:yazhal/widgets/recommended_songs_section.dart';
 import 'package:yazhal/widgets/refreshable_recommendations.dart';
 import 'package:yazhal/widgets/section_header.dart';
 
@@ -58,13 +61,16 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
-    _suggestedPlaylistsFuture = getPlaylists(
-      playlistsNum: recommendedCubesNumber,
-    );
+    _suggestedPlaylistsFuture = ProviderRouter.youtubeEnabled
+        ? getPlaylists(playlistsNum: recommendedCubesNumber)
+        : Future.value([]);
     externalRecommendations.addListener(_refreshRecommendedSongs);
     offlineMode.addListener(_refreshRecommendedSongs);
     userOfflineSongs.addListener(_scheduleProfileRefresh);
     OfflineTasteService.changes.addListener(_scheduleProfileRefresh);
+    userRecentlyPlayed.addListener(_scheduleProfileRefresh);
+    ListeningActivity.changes.addListener(_scheduleProfileRefresh);
+    ProviderRouter.changes.addListener(_scheduleProfileRefresh);
   }
 
   @override
@@ -73,6 +79,9 @@ class _HomePageState extends State<HomePage> {
     offlineMode.removeListener(_refreshRecommendedSongs);
     userOfflineSongs.removeListener(_scheduleProfileRefresh);
     OfflineTasteService.changes.removeListener(_scheduleProfileRefresh);
+    userRecentlyPlayed.removeListener(_scheduleProfileRefresh);
+    ListeningActivity.changes.removeListener(_scheduleProfileRefresh);
+    ProviderRouter.changes.removeListener(_scheduleProfileRefresh);
     _profileRefresh?.cancel();
     super.dispose();
   }
@@ -126,7 +135,40 @@ class _HomePageState extends State<HomePage> {
                   );
                 },
               ),
-              _buildSuggestedPlaylists(playlistHeight),
+              ValueListenableBuilder<List>(
+                valueListenable: userRecentlyPlayed,
+                builder: (_, history, __) {
+                  final recent = history.whereType<Map>().take(6).toList();
+                  final playlists = ListeningActivity.frequentPlaylists(
+                    getUserCustomPlaylists(),
+                    ListeningActivity.playlistCounts,
+                  );
+                  return Column(
+                    children: [
+                      if (playlists.isNotEmpty)
+                        _buildSuggestedPlaylistsSection(
+                          playlistHeight,
+                          playlists,
+                          title: 'Frequently played playlists',
+                        ),
+                      if (recent.isNotEmpty)
+                        RecommendedSongsSection(
+                          title: 'Frequently played songs',
+                          songs: ListeningActivity.frequentSongs(
+                            history.whereType<Map>(),
+                          ),
+                          listKeyPrefix: 'home_frequent',
+                        ),
+                      if (recent.isNotEmpty)
+                        RecommendedSongsSection(
+                          title: 'Recently played',
+                          songs: recent,
+                          listKeyPrefix: 'home_recent',
+                        ),
+                    ],
+                  );
+                },
+              ),
               _buildSuggestedPlaylists(playlistHeight, showOnlyLiked: true),
               _buildCurrentMonthRecapSection(),
               if (userOfflineSongs.value.isNotEmpty)
@@ -147,6 +189,8 @@ class _HomePageState extends State<HomePage> {
                   },
                 ),
               _buildRecommendedSongsSection(),
+              if (ProviderRouter.youtubeEnabled)
+                _buildSuggestedPlaylists(playlistHeight),
               const MiniPlayerBottomSpace(),
             ],
           ),
@@ -184,12 +228,15 @@ class _HomePageState extends State<HomePage> {
     double playlistHeight,
     List<dynamic> playlists, {
     bool showOnlyLiked = false,
+    String? title,
   }) {
     if (playlists.isEmpty) return const SizedBox.shrink();
 
-    final sectionTitle = showOnlyLiked
-        ? context.l10n!.backToFavorites
-        : context.l10n!.suggestedPlaylists;
+    final sectionTitle =
+        title ??
+        (showOnlyLiked
+            ? context.l10n!.backToFavorites
+            : context.l10n!.suggestedPlaylists);
     final itemsNumber = playlists.length.clamp(0, recommendedCubesNumber);
     final isLargeScreen = MediaQuery.of(context).size.width > 480;
 

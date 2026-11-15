@@ -65,8 +65,7 @@ class NowPlayingArtwork extends StatelessWidget {
 
     return FlipCard(
       rotateSide: RotateSide.right,
-      onTapFlipping:
-          !offlineMode.value && !(metadata.extras?['isLive'] ?? false),
+      onTapFlipping: !(metadata.extras?['isLive'] ?? false),
       controller: lyricsController,
       frontWidget: DecoratedBox(
         decoration: BoxDecoration(
@@ -241,6 +240,7 @@ Future<_AudioQualityInfo?> _resolveAudioQuality(String ytid) async {
 
   // Free for a song that is playing: the stream it picked is already resolved
   // and cached, so this reads it back instead of asking YouTube again.
+  if (ytid.startsWith('ext:') || ytid.startsWith('local:')) return null;
   final stream = await fetchBestAudioStream(ytid);
   if (stream == null) return null;
 
@@ -287,6 +287,19 @@ class _AudioQualityBadgeState extends State<_AudioQualityBadge> {
 
   @override
   Widget build(BuildContext context) {
+    final offered = widget.metadata.extras?['resolvedQuality']?.toString();
+    if (offered != null && offered.isNotEmpty && showAudioQualityBadge.value)
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: .55),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Text(
+          'Source: $offered',
+          style: const TextStyle(color: Colors.white, fontSize: 12),
+        ),
+      );
     final infoFuture = _infoFuture;
     if (infoFuture == null) return const SizedBox.shrink();
 

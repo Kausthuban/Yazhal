@@ -30,24 +30,43 @@ import 'package:rxdart/rxdart.dart';
 import 'package:yazhal/constants/clients.dart';
 import 'package:yazhal/main.dart';
 import 'package:yazhal/models/position_data.dart';
+import 'package:yazhal/services/audio_relay_service.dart';
 import 'package:yazhal/services/audio_service_android_auto.dart';
+import 'package:yazhal/services/catalog_metadata_service.dart';
 import 'package:yazhal/services/common_services.dart';
 import 'package:yazhal/services/data_manager.dart';
+import 'package:yazhal/services/extensions/native_extension_service.dart';
+import 'package:yazhal/services/extensions/provider_artwork_service.dart';
 import 'package:yazhal/services/flac_extension_service.dart';
+import 'package:yazhal/services/headset_gestures.dart';
+import 'package:yazhal/services/listening_activity.dart';
 import 'package:yazhal/services/listening_stats_service.dart';
 import 'package:yazhal/services/music_storage_service.dart';
 import 'package:yazhal/services/offline_taste_service.dart';
+import 'package:yazhal/services/playback_cache.dart';
+import 'package:yazhal/services/playback_sequence_manager.dart';
+import 'package:yazhal/services/public_network_client.dart';
 import 'package:yazhal/services/settings_manager.dart';
+import 'package:yazhal/services/streaming_policy.dart';
+import 'package:yazhal/utilities/listening_profile.dart';
 import 'package:yazhal/utilities/local_tracks.dart';
 import 'package:yazhal/utilities/map_utils.dart';
 import 'package:yazhal/utilities/media_duration.dart';
 import 'package:yazhal/utilities/mediaitem.dart';
 import 'package:yazhal/utilities/offline_play_session.dart';
 import 'package:yazhal/utilities/platform_utils.dart';
+import 'package:yazhal/utilities/provider_artwork.dart';
 import 'package:yazhal/utilities/queue_entry_utils.dart';
 
 class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
-  YazhalAudioHandler() {
+  YazhalAudioHandler({
+    Future<Map<String, dynamic>> Function(Map)? metadataLookup,
+    NativeExtensionService? sources,
+    PlaybackCache? cache,
+  }) : _metadataLookup =
+           metadataLookup ?? CatalogMetadataService.instance.lookup,
+       _sources = sources ?? NativeExtensionService.instance,
+       _cache = cache ?? PlaybackCache.instance {
     final androidEqualizer = Platform.isAndroid ? AndroidEqualizer() : null;
     _androidEqualizer = androidEqualizer;
     audioPlayer = AudioPlayer(
@@ -58,9 +77,9 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
           : AudioPipeline(androidAudioEffects: [androidEqualizer]),
       audioLoadConfiguration: const AudioLoadConfiguration(
         androidLoadControl: AndroidLoadControl(
-          maxBufferDuration: Duration(seconds: 60),
+          minBufferDuration: Duration(seconds: 20),
+          maxBufferDuration: Duration(minutes: 5),
           bufferForPlaybackDuration: Duration(milliseconds: 500),
-          bufferForPlaybackAfterRebufferDuration: Duration(seconds: 3),
         ),
       ),
     );
@@ -83,6 +102,9 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
 
     _initialize();
   }
+  final Future<Map<String, dynamic>> Function(Map) _metadataLookup;
+  final NativeExtensionService _sources;
+  final PlaybackCache _cache;
 
   // Player and service collaborators.
   late final AndroidEqualizer? _androidEqualizer;
@@ -93,14 +115,16 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
   DateTime _equalizerRetryNotBefore = DateTime.fromMillisecondsSinceEpoch(0);
 
   // Queue contents and active positions.
-  final List<Map> _queueList = [];
+  final PlaybackSequenceManager sequence = PlaybackSequenceManager();
+  List<Map> get _queueList => sequence.entries;
   final List<Map> _originalQueueList = [];
   final Map<String, Map> _originalQueueEntriesById = {};
   final List<Map> _historyList = [];
   final BehaviorSubject<List<Map>> _queueMapStream =
       BehaviorSubject<List<Map>>.seeded([]);
   final QueueEntryIdManager _queueEntryIds = QueueEntryIdManager();
-  int _currentQueueIndex = 0;
+  int get _currentQueueIndex => sequence.currentIndex;
+  set _currentQueueIndex(int value) => sequence.currentIndex = value;
   int _currentLoadingIndex = -1;
   int _currentLoadingTransitionId = -1;
 
@@ -113,7 +137,6 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
   bool _completionEventPending = false;
   bool _completionHandlerLoadStarted = false;
   String? _lastError;
-  int _consecutiveErrors = 0;
 
   // Timers and sleep-timer state.
   Timer? _sleepTimer;
@@ -122,16 +145,19 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
   bool sleepTimerEndOfSong = false;
 
   // Background stream preload state.
-  int _activePreloadCount = 0;
+  String? _preloadCandidate;
+  int _preloadGeneration = 0;
+  Timer? _recoveryTimer;
+  int _recoveryAttempts = 0;
+  bool _recovering = false;
+  String? _recoveryEntryId;
+  Duration? _recoveryPosition;
+  static const _recoveryDelays = [1, 2, 4, 8, 15, 30];
   final Set<String> _preloadingYtIds = <String>{};
   final Set<String> _preloadedYtIds = <String>{};
 
   // Playback, history, and timing limits.
-  static const int _maxConsecutiveErrors = 3;
   static const int _maxHistorySize = 50;
-  static const int _queueLookahead = 3;
-  static const int _maxConcurrentPreloads = 2;
-  static const Duration _errorRetryDelay = Duration(seconds: 2);
   static const Duration _songTransitionTimeout = Duration(seconds: 30);
   static const Duration _debounceInterval = Duration(milliseconds: 150);
   static const Duration _positionDataThreshold = Duration(milliseconds: 250);
@@ -208,22 +234,66 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
               repeatNotifier.value == AudioServiceRepeatMode.none &&
               _currentLoadingIndex == -1));
 
-  List<MediaControl> _controls(bool playing) {
-    final hasMultipleTracks = _queueList.length > 1;
-
-    return [
-      if (hasMultipleTracks)
-        MediaControl.skipToPrevious
-      else
-        MediaControl.rewind,
-      if (playing) MediaControl.pause else MediaControl.play,
-      MediaControl.stop,
-      if (hasMultipleTracks)
-        MediaControl.skipToNext
-      else
-        MediaControl.fastForward,
-    ];
+  late final _headset = HeadsetGestureRouter(_headsetAction);
+  @override
+  Future<void> click([MediaButton button = MediaButton.media]) async {
+    if (button == MediaButton.next) {
+      await skipToNext();
+      return;
+    }
+    if (button == MediaButton.previous) {
+      await skipToPrevious();
+      return;
+    }
+    _headset.press();
   }
+
+  Future<void> _headsetAction(String action) async {
+    switch (action) {
+      case 'toggle':
+        if (audioPlayer.playing) {
+          await pause();
+        } else {
+          await play();
+        }
+        break;
+      case 'next':
+        await skipToNext();
+        break;
+      case 'previous':
+        await skipToPrevious();
+        break;
+      case 'play':
+        await play();
+        break;
+      case 'pause':
+        await pause();
+        break;
+      case 'seekForward':
+        await seek(audioPlayer.position + const Duration(seconds: 10));
+        break;
+      case 'seekBackward':
+        final target = audioPlayer.position - const Duration(seconds: 10);
+        await seek(target < Duration.zero ? Duration.zero : target);
+        break;
+    }
+  }
+
+  List<MediaControl> _controls(bool playing) => [
+    MediaControl.skipToPrevious,
+    if (playing) MediaControl.pause else MediaControl.play,
+    MediaControl.skipToNext,
+    MediaControl.custom(
+      androidIcon: 'drawable/ic_shuffle',
+      label: shuffleNotifier.value ? 'Shuffle on' : 'Shuffle off',
+      name: 'toggleShuffle',
+    ),
+    MediaControl.custom(
+      androidIcon: 'drawable/ic_repeat',
+      label: 'Repeat ${repeatNotifier.value.name}',
+      name: 'cycleRepeat',
+    ),
+  ];
 
   final _processingStateMap = {
     ProcessingState.idle: AudioProcessingState.idle,
@@ -238,6 +308,12 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
   }
 
   void _setupEventSubscriptions() {
+    audioPlayer.errorStream.listen((error) {
+      _lastError = 'Playback failed (${error.code})';
+      StreamingPolicy.instance.stalled();
+      _handlePlaybackError();
+    });
+    audioPlayer.positionStream.listen((_) => _preloadUpcomingSongs());
     audioPlayer.playbackEventStream
         .throttleTime(const Duration(milliseconds: 100))
         .listen(
@@ -763,7 +839,7 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
               MediaAction.seekForward,
               MediaAction.seekBackward,
             },
-            androidCompactActionIndices: const [0, 1, 3],
+            androidCompactActionIndices: const [0, 1, 2],
             processingState: newProcessingState,
             playing: isPlaying,
             updatePosition: currentPosition,
@@ -848,36 +924,37 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
     }
   }
 
-  bool _canRetryPlayback() =>
-      hasNext ||
-      (repeatNotifier.value == AudioServiceRepeatMode.all &&
-          _queueList.isNotEmpty) ||
-      playNextSongAutomatically.value;
-
   void _handlePlaybackError() {
-    _consecutiveErrors++;
-    logger.log(
-      'Playback error occurred. Consecutive errors: $_consecutiveErrors',
-      error: _lastError,
-    );
-
-    if (_consecutiveErrors >= _maxConsecutiveErrors) {
-      logger.log('Max consecutive errors reached. Stopping playback.');
-      unawaited(stop());
+    if (_recoveryTimer?.isActive == true ||
+        _recovering ||
+        !_queuePlayWhenReady ||
+        currentSong == null ||
+        isLocalTrack(currentSong!) ||
+        offlineMode.value ||
+        _recoveryAttempts >= _recoveryDelays.length)
       return;
+    final entryId = currentSong!['queueEntryId']?.toString();
+    if (_recoveryEntryId != entryId || _recoveryPosition == null) {
+      _recoveryEntryId = entryId;
+      _recoveryPosition = audioPlayer.position;
     }
-
-    if (_canRetryPlayback()) {
-      final failedSongIndex = _currentQueueIndex;
-      Future.delayed(_errorRetryDelay, () {
-        // Only retry if still on the same song (user didn't manually change tracks)
-        if (_currentQueueIndex == failedSongIndex) {
-          skipToNext();
-        }
-      });
-    } else {
-      _lastError = null;
-    }
+    final position = _recoveryPosition!;
+    final delay = _recoveryDelays[_recoveryAttempts++];
+    _recoveryTimer = Timer(Duration(seconds: delay), () async {
+      if (!_queuePlayWhenReady || currentSong?['queueEntryId'] != entryId)
+        return;
+      _recovering = true;
+      try {
+        await invalidateSongStreamCache(currentSong!['ytid'].toString());
+        if (!_queuePlayWhenReady ||
+            currentSong?['queueEntryId']?.toString() != entryId)
+          return;
+        await _playFromQueue(_currentQueueIndex, resumePosition: position);
+      } finally {
+        _recovering = false;
+        if (_lastError != null) _handlePlaybackError();
+      }
+    });
   }
 
   Future<void> _handleSongCompletion() async {
@@ -935,7 +1012,8 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
 
       // The user may have skipped, paused or extended the queue meanwhile.
       final isStillRelevant =
-          audioPlayer.playing &&
+          (audioPlayer.playing ||
+              audioPlayer.processingState == ProcessingState.completed) &&
           !hasNext &&
           _getCurrentSongForRecommendations()?['ytid']?.toString() == baseYtid;
       if (recommended == null || !isStillRelevant) return;
@@ -985,9 +1063,7 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
         return;
       }
 
-      final insertIndex = playNext
-          ? (_currentQueueIndex + 1).clamp(0, _queueList.length)
-          : _queueList.length;
+      final insertIndex = sequence.manualInsertionIndex(playNext: playNext);
 
       final isFirstSong = await _insertSongToQueueInternal(
         song,
@@ -1095,95 +1171,53 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
     bool replace = false,
     int? startIndex,
     bool? shuffle,
+    String contextTitle = '',
+    bool playWhenReady = true,
   }) async {
-    try {
-      final manuallyAddedSongs = replace ? _getUnplayedManualSongs() : <Map>[];
-      final shuffleAfterReplace = shuffle ?? shuffleNotifier.value;
-      if (replace) {
-        _queueList.clear();
-        _originalQueueList.clear();
-        _originalQueueEntriesById.clear();
-        _currentQueueIndex = 0;
-        _currentLoadingIndex = -1;
-        _currentLoadingTransitionId = -1;
-        _resetPreloadingState();
-        if (shuffleNotifier.value != shuffleAfterReplace) {
-          shuffleNotifier.value = shuffleAfterReplace;
-          unawaited(
-            Hive.box('settings').put('shuffleEnabled', shuffleAfterReplace),
-          );
-          await audioPlayer.setShuffleModeEnabled(shuffleAfterReplace);
-        }
-      }
-
-      int? targetQueueIndex;
-      Map? startSong;
-      final newSongs = <Map>[];
-      final appendedStartQueueIndex = !replace && startIndex != null
-          ? appendedQueueIndexForSourceIndex(
-              songs,
-              startIndex,
-              _queueList.length,
-            )
-          : null;
-
-      for (var i = 0; i < songs.length; i++) {
-        final song = songs[i];
-        if (song['ytid'] != null && song['ytid'].toString().isNotEmpty) {
-          final queueSong = _queueEntryIds.createSong(song);
-          if (replace) {
-            newSongs.add(queueSong);
-            if (startIndex == i) startSong = queueSong;
-          } else {
-            _queueList.add(queueSong);
-          }
-        }
-      }
-
-      if (replace) {
-        if (shuffleAfterReplace && newSongs.isNotEmpty) {
-          _originalQueueList.addAll(cloneMaps(newSongs));
-          _rebuildOriginalQueueEntryIndex();
-          newSongs
-            ..remove(startSong)
-            ..shuffle();
-          _queueList
-            ..addAll(startSong != null ? [startSong] : <Map>[])
-            ..addAll(newSongs);
-          targetQueueIndex = 0;
-        } else {
-          _queueList.addAll(newSongs);
-          if (startSong != null) {
-            targetQueueIndex = _queueList.indexOf(startSong);
-          }
-        }
-      }
-
-      if (replace && manuallyAddedSongs.isNotEmpty) {
-        // Always insert after the starting song index
-        final insertIndex = (targetQueueIndex ?? 0) + 1;
-        final safeInsertIndex = insertIndex > _queueList.length
-            ? _queueList.length
-            : insertIndex;
-        _queueList.insertAll(safeInsertIndex, manuallyAddedSongs);
-      }
-
-      _hydrateQueueEntryIds();
-      _updateQueueMediaItems();
-
-      if (targetQueueIndex != null) {
-        await _playFromQueue(targetQueueIndex);
-      } else if (appendedStartQueueIndex != null) {
-        await _playFromQueue(appendedStartQueueIndex);
-      } else if (replace && _queueList.isNotEmpty) {
-        await _playFromQueue(0);
-      }
-    } catch (e, stackTrace) {
-      logger.log(
-        'Error adding playlist to queue',
-        error: e,
-        stackTrace: stackTrace,
+    final valid = <Map>[];
+    int? target;
+    for (var i = 0; i < songs.length; i++) {
+      final song = songs[i];
+      if ((song['ytid']?.toString() ?? '').isEmpty) continue;
+      if (startIndex == i) target = valid.length;
+      valid.add(_queueEntryIds.createSong(song));
+    }
+    if (valid.isEmpty) return;
+    if (replace) {
+      _currentLoadingIndex = -1;
+      _currentLoadingTransitionId = -1;
+      _resetPreloadingState();
+      final shuffled = shuffle ?? shuffleNotifier.value;
+      if (audioPlayer.audioSource == null) sequence.currentIndex = -1;
+      sequence.replaceContext(
+        valid,
+        startIndex: target ?? 0,
+        shuffle: shuffled,
+        title: contextTitle,
       );
+      _originalQueueList.clear();
+      _originalQueueEntriesById.clear();
+      if (shuffled) {
+        _originalQueueList.addAll(cloneMaps(sequence.originalContext));
+        _rebuildOriginalQueueEntryIndex();
+      }
+      if (shuffleNotifier.value != shuffled) {
+        shuffleNotifier.value = shuffled;
+        unawaited(Hive.box('settings').put('shuffleEnabled', shuffled));
+      }
+      // The sequence manager owns shuffle order; native single-source looping stays off.
+      await audioPlayer.setShuffleModeEnabled(false);
+    } else {
+      final insertion = sequence.manualInsertionIndex(playNext: false);
+      sequence.appendManual(valid);
+      if (target != null) target = insertion + target;
+    }
+    _hydrateQueueEntryIds();
+    _updateQueueMediaItems();
+    if (replace) {
+      await _playFromQueue(sequence.currentIndex, playWhenReady: playWhenReady);
+    } else if (target != null) {
+      await _playFromQueue(target, playWhenReady: playWhenReady);
     }
   }
 
@@ -1194,6 +1228,7 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
       final removedSong = _queueList[index];
       final removedQueueEntryId = _queueEntryIds.ensureId(removedSong);
       _queueList.removeAt(index);
+      sequence.forget(removedSong);
 
       if (shuffleNotifier.value && _originalQueueList.isNotEmpty) {
         _originalQueueList.removeWhere(
@@ -1283,34 +1318,22 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
   }
 
   void clearQueue() {
-    try {
-      final currentSong = _hasCurrentQueueIndex
-          ? cloneMap(_queueList[_currentQueueIndex])
-          : null;
-
-      _queueList.clear();
-      _originalQueueList.clear();
-      _originalQueueEntriesById.clear();
-
-      if (currentSong != null) {
-        _queueList.add(currentSong);
-        _originalQueueList.add(cloneMap(currentSong));
-        _rebuildOriginalQueueEntryIndex();
-      }
-
-      _currentQueueIndex = currentSong != null ? 0 : -1;
-      _currentLoadingIndex = -1;
-      _currentLoadingTransitionId = -1;
-      _resetPreloadingState();
-      _hydrateQueueEntryIds();
-      _updateQueueMediaItems();
-      _updatePlaybackState();
-    } catch (e, stackTrace) {
-      logger.log('Error clearing queue', error: e, stackTrace: stackTrace);
-    }
+    sequence.clearManual();
+    _currentLoadingIndex = -1;
+    _currentLoadingTransitionId = -1;
+    _resetPreloadingState();
+    _hydrateQueueEntryIds();
+    _updateQueueMediaItems();
+    _updatePlaybackState(force: true);
   }
 
   void _updateQueueMediaItems() {
+    if (_preloadCandidate != null &&
+        _preloadCandidate !=
+            (sequence.next == null
+                ? null
+                : '${sequence.next!['queueEntryId']}:${_cacheKey(sequence.next!)}'))
+      _resetPreloadingState();
     try {
       _queueEntryIds.ensureIds(_queueList);
 
@@ -1351,18 +1374,13 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
 
       playbackState.add(
         PlaybackState(
-          controls: [
-            MediaControl.skipToPrevious,
-            MediaControl.pause,
-            MediaControl.stop,
-            MediaControl.skipToNext,
-          ],
+          controls: _controls(true),
           systemActions: const {
             MediaAction.seek,
             MediaAction.seekForward,
             MediaAction.seekBackward,
           },
-          androidCompactActionIndices: const [0, 1, 3],
+          androidCompactActionIndices: const [0, 1, 2],
           processingState: AudioProcessingState.loading,
           speed: audioPlayer.speed,
           queueIndex:
@@ -1379,7 +1397,11 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
     }
   }
 
-  Future<void> _playFromQueue(int index, {bool playWhenReady = true}) async {
+  Future<void> _playFromQueue(
+    int index, {
+    bool playWhenReady = true,
+    Duration? resumePosition,
+  }) async {
     if (index < 0 || index >= _queueList.length) {
       logger.log('Invalid queue index: $index');
       return;
@@ -1401,6 +1423,14 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
       return;
     }
 
+    _recoveryTimer?.cancel();
+    if (!_recovering ||
+        _queueList[index]['queueEntryId']?.toString() != _recoveryEntryId) {
+      _recoveryAttempts = 0;
+      _recoveryEntryId = null;
+      _recoveryPosition = null;
+    }
+    _lastError = null;
     // Start new transition
     _songTransitionCounter++;
     final currentTransitionId = _songTransitionCounter;
@@ -1409,8 +1439,6 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
     _queuePlayWhenReady = playWhenReady;
 
     try {
-      final previousQueueIndex = _currentQueueIndex;
-      final previousMediaItem = mediaItem.valueOrNull;
       _currentQueueIndex = index;
 
       final currentSong = _queueList[_currentQueueIndex];
@@ -1430,23 +1458,29 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
         _queueList[index],
         mediaId: uniqueId,
         transitionId: currentTransitionId,
-        playWhenReady: playWhenReady,
+        playWhenReady: resumePosition == null && playWhenReady,
       );
 
       // Only process result if this is still the current transition
       if (currentTransitionId == _currentLoadingTransitionId) {
         if (success) {
-          _consecutiveErrors = 0;
+          _lastError = null;
+          _recoveryEntryId = null;
+          _recoveryPosition = null;
+          if (resumePosition != null) {
+            await audioPlayer.seek(resumePosition);
+            if (currentTransitionId == _songTransitionCounter &&
+                _queuePlayWhenReady)
+              unawaited(audioPlayer.play());
+          }
+
           _preloadUpcomingSongs();
           // Trigger background song addition if auto-play is enabled
           if (playNextSongAutomatically.value) {
             unawaited(_backgroundAddSongsToQueue());
           }
         } else {
-          _currentQueueIndex = previousQueueIndex;
-          if (previousMediaItem != null) {
-            mediaItem.add(previousMediaItem);
-          }
+          _lastError ??= 'Unable to load this song';
           _updatePlaybackState();
           _handlePlaybackError();
         }
@@ -1463,95 +1497,86 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
     }
   }
 
-  void _preloadUpcomingSongs() {
-    // Don't attempt to preload while offline mode is enabled or no current song
-    if (offlineMode.value || _currentQueueIndex < 0) return;
+  String _cacheKey(Map song) => PlaybackCache.key(
+    song,
+    '${StreamingPolicy.instance.effectiveQuality(audioQualitySetting.value)}:${Hive.box('settings').get('streamQuality.${song['extensionId']}')}',
+  );
 
-    Future.microtask(() async {
-      try {
-        final songsToPreload = <Map>[];
-
-        for (var i = 1; i <= _queueLookahead; i++) {
-          final nextIndex = _currentQueueIndex + i;
-          if (nextIndex < _queueList.length) {
-            final nextSong = _queueList[nextIndex];
-            final ytid = nextSong['ytid'];
-
-            if (ytid != null &&
-                !isNonYoutubeId(ytid) &&
-                !isSongAlreadyOffline(ytid) &&
-                !_preloadedYtIds.contains(ytid) &&
-                !_preloadingYtIds.contains(ytid)) {
-              songsToPreload.add(nextSong);
-            }
-          }
-        }
-
-        await _preloadSongsSequentially(songsToPreload);
-      } catch (e, stackTrace) {
-        logger.log(
-          'Error in _preloadUpcomingSongs',
-          error: e,
-          stackTrace: stackTrace,
-        );
-      }
-    });
-  }
-
-  Future<void> _preloadSongsSequentially(List<Map> songsToPreload) async {
-    for (final song in songsToPreload) {
-      while (_activePreloadCount >= _maxConcurrentPreloads) {
-        await Future.delayed(const Duration(milliseconds: 100));
-      }
-
-      final ytid = song['ytid'];
-      if (ytid == null || _preloadingYtIds.contains(ytid)) {
-        continue;
-      }
-
-      unawaited(_preloadSingleSongControlled(song));
-    }
-  }
-
-  Future<void> _preloadSingleSongControlled(Map nextSong) async {
-    final ytid = nextSong['ytid'];
-    if (ytid == null) return;
-
-    _preloadingYtIds.add(ytid);
-    _activePreloadCount++;
-    String? preloadUrl;
-
-    try {
-      // Don't attempt to fetch remote streams while offline mode is enabled
-      if (offlineMode.value) {
-        logger.log('Offline mode enabled; skipping preload for $ytid');
-        preloadUrl = null;
-      } else {
-        // fetchSongStreamUrl handles caching, freshness checks, and validation
-        preloadUrl = await fetchSongStreamUrl(ytid, nextSong['isLive'] ?? false)
-            .timeout(
-              const Duration(seconds: 8),
-              onTimeout: () {
-                logger.log('Preload timeout for song $ytid');
-                return null;
-              },
-            );
-      }
-    } catch (e, stackTrace) {
-      logger.log(
-        'Error preloading song $ytid',
-        error: e,
-        stackTrace: stackTrace,
+  Future<({Map<String, String> headers, bool Function(Uri) allows})>
+  _streamAccess(Map song) async {
+    if (isNativeExtensionTrack(song)) {
+      final package = await _sources.load(song['extensionId'].toString());
+      return (
+        headers: Map<String, String>.from(
+          song['_extensionHeaders'] as Map? ?? {},
+        ),
+        allows: package.allows,
       );
-    } finally {
-      _preloadingYtIds.remove(ytid);
-      if (_activePreloadCount > 0) {
-        _activePreloadCount--;
-      }
-      if (preloadUrl != null && preloadUrl.isNotEmpty) {
-        _preloadedYtIds.add(ytid);
-      }
     }
+    if (isExtensionTrack(song))
+      return (
+        headers: <String, String>{},
+        allows: FlacExtensionService.sourceFor(song).allows,
+      );
+    return (
+      headers: streamPlaybackHeaders(song['ytid']?.toString()),
+      allows: AudioRelayService.youtube,
+    );
+  }
+
+  void _preloadUpcomingSongs() {
+    final next = sequence.next;
+    final key = next == null
+        ? null
+        : '${next['queueEntryId']}:${_cacheKey(next)}';
+    if (_preloadCandidate != null && _preloadCandidate != key)
+      _resetPreloadingState();
+    if (offlineMode.value ||
+        next == null ||
+        next['isLive'] == true ||
+        isLocalTrack(next) ||
+        isSongAlreadyOffline(next['ytid']))
+      return;
+    final policy = StreamingPolicy.instance;
+    if (!policy.shouldPreload(
+      remaining: (audioPlayer.duration ?? Duration.zero) - audioPlayer.position,
+      bufferedAhead: audioPlayer.bufferedPosition - audioPlayer.position,
+      playing: audioPlayer.playing,
+    )) {
+      if (policy.dataSaver || !policy.preloadEnabled) _resetPreloadingState();
+      return;
+    }
+    if (_preloadCandidate == key) return;
+    _preloadCandidate = key;
+    final generation = ++_preloadGeneration;
+    unawaited(() async {
+      try {
+        final track = Map<String, dynamic>.from(next);
+        final url = await _getPlaybackUrl(track, false);
+        if (url == null || generation != _preloadGeneration) return;
+        final access = await _streamAccess(track);
+        if (PlaybackCache.enabled) {
+          await _cache.preload(
+            _cacheKey(track),
+            (client, headers) => AudioRelayService.instance.open(
+              client,
+              Uri.parse(url),
+              headers: {...access.headers, ...headers},
+              allows: access.allows,
+            ),
+          );
+        } else {
+          await AudioRelayService.instance.preload(
+            key!,
+            Uri.parse(url),
+            access.headers,
+            allows: access.allows,
+          );
+        }
+      } catch (_) {
+        if (generation == _preloadGeneration) _preloadCandidate = null;
+      }
+    }());
   }
 
   Map? _firstPlayableSong(Iterable songs) {
@@ -1669,7 +1694,7 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
           MediaAction.seekForward,
           MediaAction.seekBackward,
         },
-        androidCompactActionIndices: const [0, 1, 3],
+        androidCompactActionIndices: const [0, 1, 2],
         processingState: AudioProcessingState.ready,
         queueIndex: 0,
         updateTime: DateTime.now(),
@@ -1720,6 +1745,8 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
   @override
   Future<void> onTaskRemoved() async {
     try {
+      await listeningStatsService.flush();
+      if (audioPlayer.playing || shouldContinuePlayback) return;
       await stop();
       if (isMobilePlatform) {
         final session = await AudioSession.instance;
@@ -1733,9 +1760,13 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
 
   @override
   Future<void> play() async {
-    if (isDesktopPlatform && _currentLoadingIndex >= 0)
-      _queuePlayWhenReady = true;
+    _queuePlayWhenReady = true;
     try {
+      if (_lastError != null && _hasCurrentQueueIndex) {
+        _recoveryAttempts = 0;
+        await _playFromQueue(_currentQueueIndex);
+        return;
+      }
       if (audioPlayer.audioSource == null) {
         final recentSong = latestResumableSong();
         if (recentSong != null) {
@@ -1767,8 +1798,9 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
 
   @override
   Future<void> pause() async {
-    if (isDesktopPlatform && _currentLoadingIndex >= 0)
-      _queuePlayWhenReady = false;
+    _queuePlayWhenReady = false;
+    _recoveryTimer?.cancel();
+    _resetPreloadingState();
     try {
       listeningStatsService.recordListeningSessionProgress(
         wasPlaying: audioPlayer.playing,
@@ -1790,12 +1822,15 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
 
   @override
   Future<void> stop() async {
+    _headset.cancel();
+    _queuePlayWhenReady = false;
+    _recoveryTimer?.cancel();
     _debounceTimer?.cancel();
     _completionEventPending = false;
     _currentLoadingIndex = -1;
     _currentLoadingTransitionId = -1;
     _lastError = null;
-    _consecutiveErrors = 0;
+
     try {
       listeningStatsService.finishListeningSession(
         countCurrentTick: true,
@@ -1821,7 +1856,17 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
   }
 
   void _resetPreloadingState() {
-    _activePreloadCount = 0;
+    unawaited(
+      _cache.cancelPreload(
+        preserveKey: _hasCurrentQueueIndex
+            ? _cacheKey(_queueList[_currentQueueIndex])
+            : null,
+      ),
+    );
+    _preloadGeneration++;
+    _preloadCandidate = null;
+    AudioRelayService.instance.cancelPreload();
+
     _preloadingYtIds.clear();
     _preloadedYtIds.clear();
   }
@@ -1881,6 +1926,7 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
       final offline = getOfflineSongByYtid(songData['ytid']);
       final path = await MusicStorageService.playbackPath(
         offline.isNotEmpty ? offline : songData,
+        directPlayback: true,
       );
       if (path == null) return false;
       songData['audioPath'] = path;
@@ -1911,6 +1957,24 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
     int? transitionId,
     bool playWhenReady = true,
   }) async {
+    if (transitionId == null) {
+      final occurrence = _queueList.indexWhere(
+        (s) =>
+            identical(s, song) ||
+            (song['queueEntryId'] != null &&
+                s['queueEntryId'] == song['queueEntryId']),
+      );
+      if (occurrence >= 0) {
+        await _playFromQueue(occurrence, playWhenReady: playWhenReady);
+      } else {
+        await addPlaylistToQueue(
+          [song],
+          replace: true,
+          playWhenReady: playWhenReady,
+        );
+      }
+      return _lastError == null;
+    }
     try {
       final songData = cloneMap(song);
 
@@ -1927,6 +1991,11 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
         await audioPlayer.pause();
       }
 
+      _emitOptimisticLoadingState(
+        song: songData,
+        includeMediaItem: true,
+        mediaId: mediaId,
+      );
       final playback = await _resolvePlaybackSource(songData);
 
       // Abort if a newer song was requested while we were fetching the stream URL.
@@ -1939,6 +2008,12 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
         return false;
       }
 
+      if (playback != null &&
+          _hasCurrentQueueIndex &&
+          _queueList[_currentQueueIndex]['ytid'] == songData['ytid']) {
+        _queueList[_currentQueueIndex]['_resolvedQuality'] =
+            songData['_resolvedQuality'];
+      }
       if (playback == null) {
         _lastError = 'Failed to get song URL';
         return false;
@@ -2036,14 +2111,47 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
     return _PlaybackSource(songUrl: songUrl, isOffline: isOffline);
   }
 
+  final _providerUrls = <String, ({DateTime time, String url, Map data})>{};
   Future<String?> _getPlaybackUrl(Map song, bool isOffline) async {
     if (isOffline) {
       return _getOfflineSongUrl(song);
     }
 
+    if (isNativeExtensionTrack(song)) {
+      final key = '${song['ytid']}:${_cacheKey(song)}';
+      final cached = _providerUrls[key];
+      if (cached != null &&
+          DateTime.now().difference(cached.time) < const Duration(minutes: 5)) {
+        song.addAll(cached.data);
+        return cached.url;
+      }
+      final resolved = await _sources.resolve(
+        song,
+        quality: await _sources.playbackQuality(
+          song,
+          StreamingPolicy.instance.effectiveQuality(audioQualitySetting.value),
+        ),
+      );
+      final data = {
+        '_extensionHeaders': resolved['headers'] ?? <String, String>{},
+        '_resolvedQuality': resolved['quality'] ?? resolved['format'],
+      };
+      song.addAll(data);
+      if (_providerUrls.length >= 8)
+        _providerUrls.remove(_providerUrls.keys.first);
+      final url = resolved['url'].toString();
+      _providerUrls[key] = (time: DateTime.now(), url: url, data: data);
+      return url;
+    }
     if (isExtensionTrack(song))
       return FlacExtensionService.instance.playbackUrl(song);
-    return fetchSongStreamUrl(song['ytid'], song['isLive'] ?? false);
+    return fetchSongStreamUrl(
+      song['ytid'],
+      song['isLive'] ?? false,
+      quality: StreamingPolicy.instance.effectiveQuality(
+        audioQualitySetting.value,
+      ),
+    );
   }
 
   Future<String?> _getOfflineSongUrl(Map song) async {
@@ -2053,6 +2161,7 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
       return null;
     }
 
+    if (audioPath.startsWith('content:')) return audioPath;
     final file = File(audioPath);
     if (await file.exists()) {
       return audioPath;
@@ -2113,6 +2222,7 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
         return false;
       }
 
+      unawaited(_cache.releaseRetired());
       final resolvedDuration = loadedDuration ?? audioPlayer.duration;
       if (resolvedDuration != null && _playerSourceMatchesCurrentSong()) {
         _updateCurrentMediaItemWithDuration(
@@ -2140,9 +2250,8 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
         );
       _offlinePlaySession.prepare(song, offline: isOffline);
       _recordOfflineStart();
-      final startPlayback = transitionId == null || !isDesktopPlatform
-          ? playWhenReady
-          : _queuePlayWhenReady;
+      final startPlayback =
+          playWhenReady && (transitionId == null || _queuePlayWhenReady);
       if (startPlayback)
         unawaited(
           audioPlayer.play().catchError((Object e, StackTrace stackTrace) {
@@ -2155,12 +2264,9 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
           }),
         );
       unawaited(updateRecentlyPlayed(song['ytid'], songFallback: song));
-
-      if (!isOffline) {
-        final cacheKey =
-            'song_${song['ytid']}_${audioQualitySetting.value}_url';
-        unawaited(addOrUpdateData<String>('cache', cacheKey, songUrl));
-      }
+      unawaited(ListeningActivity.record(song));
+      unawaited(_enrichPlayingMetadata(song));
+      unawaited(_warmNotificationArtwork(song));
 
       _updatePlaybackState();
 
@@ -2270,10 +2376,20 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
     try {
       if (playlist != null && playlist['list'] != null) {
         await addPlaylistToQueue(
-          List<Map>.from(playlist['list']),
+          (playlist['list'] as List)
+              .whereType<Map>()
+              .map(
+                (song) => <String, dynamic>{
+                  ...song,
+                  if ((playlist['ytid']?.toString() ?? '').isNotEmpty)
+                    '_originPlaylistId': playlist['ytid'].toString(),
+                },
+              )
+              .toList(),
           replace: true,
           startIndex: songIndex,
           shuffle: shuffle,
+          contextTitle: playlist['title']?.toString() ?? '',
         );
       }
     } catch (e, stackTrace) {
@@ -2372,7 +2488,9 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
       final tag = mapToMediaItem(song);
 
       if (isOffline) {
-        final fileSource = AudioSource.file(songUrl, tag: tag);
+        final fileSource = songUrl.startsWith('content:')
+            ? AudioSource.uri(Uri.parse(songUrl), tag: tag)
+            : AudioSource.file(songUrl, tag: tag);
 
         if (sponsorBlockSupport.value &&
             !isLocalTrack(song) &&
@@ -2384,7 +2502,52 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
         return fileSource;
       }
 
-      final uri = Uri.parse(songUrl);
+      if (song['isLive'] != true &&
+          PlaybackCache.enabled &&
+          !StreamingPolicy.instance.dataSaver) {
+        final access = await _streamAccess(song);
+        final checkedUri=Uri.parse(songUrl);
+        if (!PublicNetworkClient.publicHttps(checkedUri) || !access.allows(checkedUri)) throw const FormatException('Unapproved audio stream host');
+        final key = _cacheKey(song);
+        return await _cache.source(
+          key,
+          (client, headers) => AudioRelayService.instance.open(
+            client,
+            Uri.parse(songUrl),
+            headers: {...access.headers, ...headers},
+            allows: access.allows,
+          ),
+          tag: tag,
+        );
+      }
+      var uri = Uri.parse(songUrl);
+      if (isNativeExtensionTrack(song)) {
+        final source = await _sources.load(song['extensionId'].toString());
+        uri = Uri.parse(
+          await AudioRelayService.instance.register(
+            uri,
+            headers: Map<String, String>.from(
+              song['_extensionHeaders'] as Map? ?? {},
+            ),
+            allows: source.allows,
+          ),
+        );
+      } else if (isExtensionTrack(song)) {
+        final source = FlacExtensionService.sourceFor(song);
+        uri = Uri.parse(
+          await AudioRelayService.instance.register(uri, allows: source.allows),
+        );
+      } else if (song['isLive'] != true) {
+        if (!AudioRelayService.youtube(uri))
+          throw const FormatException('Unapproved audio stream host');
+        uri = Uri.parse(
+          await AudioRelayService.instance.register(
+            uri,
+            headers: streamPlaybackHeaders(song['ytid']?.toString()),
+            allows: AudioRelayService.youtube,
+          ),
+        );
+      }
       final needsClientHeaders =
           song['isLive'] != true && uri.host.endsWith('googlevideo.com');
       final audioSource = AudioSource.uri(
@@ -2507,15 +2670,13 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
         );
       } else if (repeatNotifier.value == AudioServiceRepeatMode.all &&
           _queueList.isNotEmpty) {
+        sequence.restartContextCycle();
+        _updateQueueMediaItems();
         await _playFromQueue(0, playWhenReady: playWhenReady);
       } else if (playNextSongAutomatically.value &&
           _currentLoadingIndex == -1) {
         // At end of queue with auto-play enabled - trigger background fetch
         unawaited(_backgroundAddSongsToQueue());
-      } else {
-        if (audioPlayer.processingState != ProcessingState.completed) {
-          await stop();
-        }
       }
 
       _cleanupOldPreloadedSongs();
@@ -2536,6 +2697,8 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
           _currentQueueIndex - 1,
           playWhenReady: playWhenReady,
         );
+      } else if (_hasCurrentQueueIndex) {
+        await seek(Duration.zero);
       } else if (_historyList.isNotEmpty) {
         final lastSong = cloneMap(_historyList.removeLast());
         _queueList.insert(0, lastSong);
@@ -2769,10 +2932,77 @@ class YazhalAudioHandler extends BaseAudioHandler implements AndroidAutoHost {
     }
   }
 
+  Future<void> _warmNotificationArtwork(Map song) async {
+    final token = song['highResImage']?.toString() ?? '';
+    if (Uri.tryParse(token)?.scheme != providerArtworkScheme) return;
+    try {
+      var file = ProviderArtworkService.instance.cached(token);
+      if (file == null && offlineMode.value) return;
+      file ??= await ProviderArtworkService.instance.load(token);
+      final current = mediaItem.value;
+      if (file != null && current?.extras?['ytid'] == song['ytid'])
+        mediaItem.add(current!.copyWith(artUri: file.uri));
+    } catch (_) {
+      /* Brand artwork stays visible when the cover is unavailable. */
+    }
+  }
+
+  Future<void> _enrichPlayingMetadata(Map song) async {
+    if (offlineMode.value) return;
+    final info = await _metadataLookup(song);
+    if (info.isEmpty) return;
+    final fields = <String, dynamic>{};
+    final cover = info['catalogArtwork']?.toString() ?? '';
+    if (cover.isNotEmpty && (cleanArtwork(song['highResImage']).isEmpty)) {
+      fields.addAll({
+        'image': cover,
+        'highResImage': cover,
+        'lowResImage': cover,
+      });
+    }
+    if ((song['album']?.toString() ?? '').isEmpty)
+      fields['album'] = info['catalogAlbum'];
+    if (ListeningProfile.languageOf(song) == null &&
+        ListeningProfile.languageOf({'language': info['catalogGenre']}) != null)
+      fields['language'] = ListeningProfile.languageOf({
+        'language': info['catalogGenre'],
+      });
+    if (fields.isEmpty) return;
+    final updated = userRecentlyPlayed.value
+        .map(
+          (entry) => entry is Map && entry['ytid'] == song['ytid']
+              ? <String, dynamic>{...entry, ...fields}
+              : entry,
+        )
+        .toList();
+    userRecentlyPlayed.value = updated;
+    await addOrUpdateData<List>('user', 'recentlyPlayedSongs', updated);
+    if (_hasCurrentQueueIndex &&
+        _queueList[_currentQueueIndex]['ytid'] == song['ytid']) {
+      _queueList[_currentQueueIndex].addAll(fields);
+      mediaItem.add(mapToMediaItem(_queueList[_currentQueueIndex]));
+    }
+  }
+
   @override
   Future<void> customAction(String name, [Map<String, dynamic>? extras]) async {
     try {
       switch (name) {
+        case 'toggleShuffle':
+          await setShuffleMode(
+            shuffleNotifier.value
+                ? AudioServiceShuffleMode.none
+                : AudioServiceShuffleMode.all,
+          );
+          break;
+        case 'cycleRepeat':
+          final nextMode = repeatNotifier.value == AudioServiceRepeatMode.none
+              ? AudioServiceRepeatMode.all
+              : repeatNotifier.value == AudioServiceRepeatMode.all
+              ? AudioServiceRepeatMode.one
+              : AudioServiceRepeatMode.none;
+          await setRepeatMode(nextMode);
+          break;
         case 'clearQueue':
           clearQueue();
           break;

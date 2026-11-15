@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:hive_ce/hive_ce.dart';
 import 'package:http/http.dart' as http;
+import 'package:yazhal/services/public_network_client.dart';
 
 class FlacExtension {
   FlacExtension({
@@ -52,7 +53,7 @@ class FlacExtension {
   }
 
   bool allows(Uri uri) =>
-      uri.scheme == 'https' &&
+      PublicNetworkClient.publicHttps(uri) &&
       uri.userInfo.isEmpty &&
       !uri.hasFragment &&
       (!uri.hasPort || uri.port == 443) &&
@@ -69,7 +70,7 @@ class FlacExtension {
 
 class FlacExtensionService {
   FlacExtensionService({http.Client? client})
-    : client = client ?? http.Client();
+    : client = client ?? PublicNetworkClient.create();
   static final instance = FlacExtensionService();
   final http.Client client;
   static List<FlacExtension> get extensions {
@@ -85,7 +86,14 @@ class FlacExtensionService {
       ),
       ...(box.get('flacExtensions', defaultValue: <dynamic>[]) as List)
           .whereType<Map>()
-          .map((m) => FlacExtension.parse(m, installed: true)),
+          .map((m) {
+            try {
+              return FlacExtension.parse(m, installed: true);
+            } catch (_) {
+              return null;
+            }
+          })
+          .whereType<FlacExtension>(),
     ];
   }
 
@@ -96,6 +104,8 @@ class FlacExtensionService {
             .map((e) => e.toJson())
             .toList()
           ..add({...extension.toJson(), 'enabled': false});
+    if (list.length > 100)
+      throw const FormatException('Maximum 100 installed catalogs');
     await Hive.box('settings').put('flacExtensions', list);
   }
 
@@ -132,7 +142,7 @@ class FlacExtensionService {
           .timeout(const Duration(seconds: 25));
       if ([301, 302, 303, 307, 308].contains(response.statusCode)) {
         final location = response.headers['location'];
-        await response.stream.drain<void>();
+        await PublicNetworkClient.cancelBody(response);
         if (location == null)
           throw const HttpException('Missing redirect location');
         uri = uri.resolve(location);
@@ -146,7 +156,7 @@ class FlacExtensionService {
   Future<Map> _json(FlacExtension extension, Uri uri) async {
     final response = await open(extension, uri);
     if (response.statusCode != 200) {
-      await response.stream.drain<void>();
+      await PublicNetworkClient.cancelBody(response);
       throw HttpException('Source unavailable (${response.statusCode})');
     }
     final bytes = <int>[];
@@ -274,7 +284,7 @@ class FlacExtensionService {
       Uri.parse(song['streamUrl'].toString()),
     );
     if (response.statusCode != 200) {
-      await response.stream.drain<void>();
+      await PublicNetworkClient.cancelBody(response);
       throw HttpException('FLAC download failed (${response.statusCode})');
     }
     final sink = target.openWrite();
@@ -307,7 +317,7 @@ class FlacExtensionService {
       Uri.parse(song['streamUrl'].toString()),
     );
     if (response.statusCode != 200) {
-      await response.stream.drain<void>();
+      await PublicNetworkClient.cancelBody(response);
       throw const HttpException('FLAC source unavailable');
     }
     final bytes = <int>[];

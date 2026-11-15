@@ -3,8 +3,13 @@ import java.io.FileInputStream
 
 plugins {
     id("com.android.application")
+    id("org.jetbrains.kotlin.android")
     id("dev.flutter.flutter-gradle-plugin")
 }
+
+val previewBuild = providers.gradleProperty("yazhalPreview").orNull == "true"
+
+val previewKey = providers.gradleProperty("yazhalPreviewKeyPath").orNull
 
 val localProperties = Properties()
 val localPropertiesFile = rootProject.file("local.properties")
@@ -48,7 +53,8 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.kausthuban.yazhal"
+        applicationId = if (previewBuild) "com.kausthuban.yazhal.preview" else "com.kausthuban.yazhal"
+        manifestPlaceholders["appLabel"] = if (previewBuild) "Yazhal Preview" else "Yazhal"
         minSdk = 24
         targetSdk = 36
         versionCode = flutter.versionCode
@@ -69,6 +75,9 @@ android {
     }
 
     signingConfigs {
+        getByName("debug") {
+            if (previewBuild && previewKey != null) storeFile = file(previewKey)
+        }
         create("release") {
             // From decoded key
             storeFile = file("key.jks")
@@ -93,7 +102,8 @@ android {
 
     buildTypes {
         getByName("release") {
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = signingConfigs.getByName(if (previewBuild) "debug" else "release")
+            if (previewBuild) versionNameSuffix = " Preview"
             isShrinkResources = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

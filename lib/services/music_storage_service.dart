@@ -84,11 +84,17 @@ class MusicStorageService {
 
   /// Document providers are played through a disposable private cache. The
   /// original document is revalidated on every access (including after reboot).
-  static Future<String?> playbackPath(Map song) async {
+  static Future<String?> playbackPath(
+    Map song, {
+    bool directPlayback = false,
+  }) async {
     final uri = song['sourceUri']?.toString() ?? song['audioUri']?.toString();
     if (uri != null && uri.isNotEmpty) {
       if (uri.startsWith('content:')) {
-        return channel.invokeMethod<String>('preparePlayback', {'uri': uri});
+        return channel.invokeMethod<String>(
+          directPlayback ? 'preparePlaybackUri' : 'preparePlayback',
+          {'uri': uri},
+        );
       }
       final file = uri.startsWith('file:')
           ? File.fromUri(Uri.parse(uri))

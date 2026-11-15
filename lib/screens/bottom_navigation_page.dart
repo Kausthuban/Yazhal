@@ -31,6 +31,7 @@ import 'package:yazhal/services/settings_manager.dart';
 import 'package:yazhal/utilities/flutter_bottom_sheet.dart'
     show closeCurrentBottomSheet;
 import 'package:yazhal/widgets/mini_player.dart';
+import 'package:yazhal/widgets/selection_nav_host.dart';
 
 class BottomNavigationPage extends StatefulWidget {
   const BottomNavigationPage({required this.child, super.key});
@@ -122,7 +123,10 @@ class _BottomNavigationPageState extends State<BottomNavigationPage> {
                                       bottom: bottomPadding,
                                     ),
                                   ),
-                                  child: widget.child,
+                                  child: SelectionNavHost(
+                                    enabled: !isLargeScreen,
+                                    child: widget.child,
+                                  ),
                                 ),
                                 const Padding(
                                   padding: EdgeInsets.symmetric(
@@ -140,23 +144,33 @@ class _BottomNavigationPageState extends State<BottomNavigationPage> {
                   ),
                 ),
                 bottomNavigationBar: !isLargeScreen
-                    ? NavigationBar(
-                        selectedIndex: _getCurrentIndex(items, isOfflineMode),
-                        labelBehavior: languageSetting == const Locale('en', '')
-                            ? NavigationDestinationLabelBehavior
-                                  .onlyShowSelected
-                            : NavigationDestinationLabelBehavior.alwaysHide,
-                        onDestinationSelected: (index) =>
-                            _onTabTapped(index, items),
-                        destinations: items
-                            .map(
-                              (item) => NavigationDestination(
-                                icon: Icon(item.icon),
-                                selectedIcon: Icon(item.selectedIcon),
-                                label: item.label,
+                    ? ValueListenableBuilder<Widget?>(
+                        valueListenable: selectionNavigationBar,
+                        builder: (_, selection, __) =>
+                            selection ??
+                            NavigationBar(
+                              selectedIndex: _getCurrentIndex(
+                                items,
+                                isOfflineMode,
                               ),
-                            )
-                            .toList(),
+                              labelBehavior:
+                                  languageSetting == const Locale('en', '')
+                                  ? NavigationDestinationLabelBehavior
+                                        .onlyShowSelected
+                                  : NavigationDestinationLabelBehavior
+                                        .alwaysHide,
+                              onDestinationSelected: (index) =>
+                                  _onTabTapped(index, items),
+                              destinations: items
+                                  .map(
+                                    (item) => NavigationDestination(
+                                      icon: Icon(item.icon),
+                                      selectedIcon: Icon(item.selectedIcon),
+                                      label: item.label,
+                                    ),
+                                  )
+                                  .toList(),
+                            ),
                       )
                     : null,
               );

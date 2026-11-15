@@ -33,7 +33,8 @@
     </queries>
 
     <application
-        android:label="Yazhal"
+        android:label="${appLabel}"
+        android:allowBackup="false"
         android:name="${applicationName}"
         android:fullBackupContent="@xml/backup_rules"
         android:dataExtractionRules="@xml/data_extraction_rules"

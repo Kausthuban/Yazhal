@@ -30,11 +30,13 @@ import 'package:yazhal/database/radio_stations.db.dart';
 import 'package:yazhal/extensions/l10n.dart';
 import 'package:yazhal/main.dart';
 import 'package:yazhal/models/radio_model.dart';
-import 'package:yazhal/screens/flac_extensions_page.dart';
+import 'package:yazhal/screens/extension_search_page.dart';
 import 'package:yazhal/services/common_services.dart';
 import 'package:yazhal/services/data_manager.dart';
 import 'package:yazhal/services/playlists_manager.dart';
+import 'package:yazhal/services/provider_router.dart';
 import 'package:yazhal/services/router_service.dart';
+import 'package:yazhal/services/settings_manager.dart' show offlineMode;
 import 'package:yazhal/utilities/app_utils.dart';
 import 'package:yazhal/utilities/flutter_toast.dart';
 import 'package:yazhal/widgets/artist_bar.dart';
@@ -50,7 +52,8 @@ import 'package:yazhal/widgets/song_bar.dart';
 import 'package:yazhal/widgets/song_selection_region.dart';
 
 class SearchPage extends StatefulWidget {
-  const SearchPage({super.key});
+  const SearchPage({this.classic = false, super.key});
+  final bool classic;
 
   @override
   _SearchPageState createState() => _SearchPageState();
@@ -120,6 +123,16 @@ class _SearchPageState extends State<SearchPage> {
       _suggestionsList = [];
       _fetchingSongs.value = false;
       if (mounted) setState(() {});
+      return;
+    }
+    if (offlineMode.value) {
+      _fetchingSongs.value = false;
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Turn off offline mode to search online.'),
+          ),
+        );
       return;
     }
     _fetchingSongs.value = true;
@@ -265,17 +278,21 @@ class _SearchPageState extends State<SearchPage> {
 
   @override
   Widget build(BuildContext context) {
+    if (!widget.classic || !ProviderRouter.youtubeEnabled)
+      return const ExtensionSearchPage();
     final primaryColor = Theme.of(context).colorScheme.primary;
     return Scaffold(
       appBar: AppBar(
         title: Text(context.l10n!.search),
         actions: [
           IconButton(
-            tooltip: 'Search FLAC catalogs',
+            tooltip: 'Search extension providers',
             icon: const Icon(Icons.high_quality),
             onPressed: () => Navigator.push(
               context,
-              MaterialPageRoute<void>(builder: (_) => const FlacSearchPage()),
+              MaterialPageRoute<void>(
+                builder: (_) => const ExtensionSearchPage(),
+              ),
             ),
           ),
         ],
@@ -313,6 +330,12 @@ class _SearchPageState extends State<SearchPage> {
                           // results of the last search have to go with them.
                           if (query.isEmpty) {
                             unawaited(search());
+                            return;
+                          }
+
+                          if (offlineMode.value) {
+                            _suggestionsList = [];
+                            if (mounted) setState(() {});
                             return;
                           }
 

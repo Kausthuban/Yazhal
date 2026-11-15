@@ -63,17 +63,18 @@ class RecommendedSongsSection extends StatelessWidget {
           actionButton: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              IconButton(
-                onPressed: onRefresh,
-                tooltip: context.l10n!.refreshRecommendations,
-                icon: refreshing
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.refresh),
-              ),
+              if (onRefresh != null || refreshing)
+                IconButton(
+                  onPressed: onRefresh,
+                  tooltip: context.l10n!.refreshRecommendations,
+                  icon: refreshing
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.refresh),
+                ),
               if (showPlayButton && songs.isNotEmpty)
                 IconButton(
                   onPressed: () async {
@@ -105,6 +106,10 @@ class RecommendedSongsSection extends StatelessWidget {
               child: SongBar(
                 song,
                 true,
+                onPlay: () => audioHandler.playPlaylistSong(
+                  playlist: {'title': title, 'list': songs},
+                  songIndex: index,
+                ),
                 barPadding: const EdgeInsetsDirectional.only(
                   top: 10,
                   bottom: 10,

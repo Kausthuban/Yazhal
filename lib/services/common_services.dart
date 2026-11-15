@@ -30,18 +30,23 @@ import 'package:http/http.dart' as http;
 import 'package:yazhal/constants/clients.dart';
 import 'package:yazhal/main.dart' show logger;
 import 'package:yazhal/services/data_manager.dart';
+import 'package:yazhal/services/extensions/native_extension_service.dart';
+import 'package:yazhal/services/extensions/provider_artwork_service.dart';
 import 'package:yazhal/services/flac_extension_service.dart';
 import 'package:yazhal/services/io_service.dart';
 import 'package:yazhal/services/lyrics_manager.dart';
 import 'package:yazhal/services/music_storage_service.dart';
 import 'package:yazhal/services/offline_taste_service.dart';
 import 'package:yazhal/services/playlists_manager.dart';
+import 'package:yazhal/services/provider_router.dart';
 import 'package:yazhal/services/proxy_manager.dart';
 import 'package:yazhal/services/settings_manager.dart';
 import 'package:yazhal/utilities/app_utils.dart';
 import 'package:yazhal/utilities/formatter.dart';
+import 'package:yazhal/utilities/listening_profile.dart';
 import 'package:yazhal/utilities/local_tracks.dart';
 import 'package:yazhal/utilities/map_utils.dart';
+import 'package:yazhal/utilities/provider_artwork.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
 List globalSongs = [];
@@ -106,7 +111,15 @@ const Duration _manifestTimeout = Duration(seconds: 30);
 const Duration _cacheValidationDuration = Duration(hours: 1);
 
 /// Fetches a stream manifest for a song, honoring proxy settings.
-Future<StreamManifest?> _fetchStreamManifest(String songId) async {
+final _manifestRequests = <String, Future<StreamManifest?>>{};
+Future<StreamManifest?> _fetchStreamManifest(String songId) =>
+    _manifestRequests.putIfAbsent(
+      songId,
+      () => _loadStreamManifest(songId).whenComplete(() {
+        _manifestRequests.remove(songId);
+      }),
+    );
+Future<StreamManifest?> _loadStreamManifest(String songId) async {
   if (useProxy.value) {
     return ProxyManager().getSongManifest(songId).timeout(_manifestTimeout);
   }
@@ -179,20 +192,8 @@ Future<bool> _validateCachedUrl(String songId, String cachedUrl) async {
   }
 }
 
-Future<List> fetchSongsList(String searchQuery) async {
-  try {
-    // If not in cache, perform the search
-    final List<Video> searchResults = await ytClient.search.search(searchQuery);
-    final songsList = searchResults
-        .map((video) => returnSongLayout(0, video))
-        .toList();
-
-    return songsList;
-  } catch (e, stackTrace) {
-    logger.log('Error in fetchSongsList', error: e, stackTrace: stackTrace);
-    return [];
-  }
-}
+Future<List> fetchSongsList(String searchQuery) =>
+    ProviderRouter.search(searchQuery);
 
 final _offlineDiscoveryCache = <String, ({DateTime time, List songs})>{};
 Future<List> _discoverOfflineQuery(String query) async {
@@ -219,6 +220,48 @@ Future<List> getRecommendedSongs({
         : (local..shuffle());
     return songs
         .where((s) => !excludedIds.contains(s['ytid']?.toString()))
+        .take(15)
+        .toList();
+  }
+  final preferredLanguage = Hive.box('settings')
+      .get('discoveryLanguage', defaultValue: 'automatic')
+      .toString();
+  final taste = ListeningProfile(
+    [
+      ...userRecentlyPlayed.value.whereType<Map>(),
+      ...OfflineTasteService.history,
+    ],
+    preferredLanguage: preferredLanguage == 'automatic'
+        ? null
+        : preferredLanguage,
+  );
+  if (!ProviderRouter.youtubeEnabled) {
+    final seen = <String>{...excludedIds};
+    final results = <Map>[];
+    final language = Hive.box('settings')
+        .get('discoveryLanguage', defaultValue: 'automatic')
+        .toString();
+    final queries = taste.queries.isNotEmpty
+        ? taste.queries
+        : profile.discoveryQueries;
+    if (queries.isEmpty)
+      queries.add(
+        '${language == 'automatic' ? (taste.language ?? 'tamil') : language} songs',
+      );
+    final batches = await Future.wait(
+      queries.take(3).map((q) async {
+        try {
+          return await ProviderRouter.search(q);
+        } catch (_) {
+          return <Map>[];
+        }
+      }),
+    );
+    for (final rows in batches) results.addAll(rows);
+    if (results.isEmpty) results.addAll(local);
+    return taste
+        .rank(results)
+        .where((s) => seen.add(s['ytid'].toString()))
         .take(15)
         .toList();
   }
@@ -349,6 +392,35 @@ Future<List> getRecommendedSongsForPlaylist(
           .take(15)
           .toList();
     }
+    if (!ProviderRouter.youtubeEnabled) {
+      final preference = Hive.box('settings')
+          .get('discoveryLanguage', defaultValue: 'automatic')
+          .toString();
+      final profile = ListeningProfile(
+        playlistSongs.whereType<Map>(),
+        preferredLanguage: preference == 'automatic' ? null : preference,
+      );
+      final matches = <Map>[];
+      for (final query in profile.queries.take(2)) {
+        try {
+          matches.addAll(await ProviderRouter.search(query));
+        } catch (_) {}
+      }
+      if (matches.isEmpty)
+        return await getRecommendedSongs(
+          excludedIds: {...existingIds.whereType<String>(), ...excludedIds},
+          forceRefresh: forceRefresh,
+        );
+      return profile
+          .rank(matches)
+          .where(
+            (s) =>
+                !existingIds.contains(s['ytid']) &&
+                !excludedIds.contains(s['ytid']),
+          )
+          .take(15)
+          .toList();
+    }
     final cached = _playlistRecommendationsCache[playlistId];
     if (cached != null && !forceRefresh) {
       final stillFresh = cached
@@ -454,6 +526,8 @@ Future<List> _getRecommendationsFromMixedSources({
   );
 }
 
+Future<void> _likedWriteTail = Future.value();
+
 Future<void> updateSongLikeStatus(
   dynamic songId,
   bool add, {
@@ -493,9 +567,14 @@ Future<void> updateSongLikeStatus(
       return;
 
     userLikedSongsList.value = updatedLikedSongs;
-    unawaited(
-      addOrUpdateData<List>('user', 'likedSongs', userLikedSongsList.value),
+    final snapshot = List.of(updatedLikedSongs);
+    final write = _likedWriteTail.then(
+      (_) => Hive.box('user').put('likedSongs', snapshot),
     );
+    _likedWriteTail = write.catchError((Object e, StackTrace st) {
+      logger.log('Favourite persistence failed', error: e, stackTrace: st);
+    });
+    await write;
   } catch (e, stackTrace) {
     logger.log(
       'Error updating song like status',
@@ -527,7 +606,7 @@ List _deduplicateLikedSongs(Iterable<dynamic> likedSongs) {
     }
 
     final songId = song['ytid']?.toString();
-    if (songId == null || songId.isEmpty || isLocalTrackId(songId)) {
+    if (songId == null || songId.isEmpty) {
       deduplicatedSongs.add(song);
       continue;
     }
@@ -642,17 +721,23 @@ bool isPlaylistFullyOffline(List songs) {
   return songs.every((s) => offlineIds.contains(s['ytid']));
 }
 
-Map<String, dynamic> getOfflineSongByYtid(String ytid) {
-  try {
-    final song = userOfflineSongs.value.firstWhere(
-      (s) => s['ytid'] == ytid,
-      orElse: () => <String, dynamic>{},
-    );
-    return Map<String, dynamic>.from(song);
-  } catch (_) {
-    return <String, dynamic>{};
+Map<String, Map> _createOfflineIndex() {
+  final index = <String, Map>{};
+  void refresh() {
+    index.clear();
+    for (final song in userOfflineSongs.value.whereType<Map>()) {
+      index[song['ytid'].toString()] = song;
+    }
   }
+
+  refresh();
+  userOfflineSongs.addListener(refresh);
+  return index;
 }
+
+final _offlineIndex = _createOfflineIndex();
+Map<String, dynamic> getOfflineSongByYtid(String ytid) =>
+    Map<String, dynamic>.from(_offlineIndex[ytid] ?? const {});
 
 Future<List<String>> getSearchSuggestions(String query) async {
   // Custom implementation:
@@ -747,6 +832,24 @@ Future<Map<String, dynamic>?> getSimilarSong(
   String songYtId, {
   Set<String> excludedYtIds = const {},
 }) async {
+  if (!ProviderRouter.youtubeEnabled) {
+    final songs = await getRecommendedSongs(excludedIds: excludedYtIds);
+    return songs
+        .whereType<Map>()
+        .where(
+          (song) =>
+              isNativeExtensionTrack(song) &&
+              NativeExtensionService.enabled.any(
+                (p) =>
+                    p['id'] == song['extensionId'] &&
+                    ((p['manifest'] as Map?)?['type'] as List? ?? []).contains(
+                      'download_provider',
+                    ),
+              ),
+        )
+        .map(Map<String, dynamic>.from)
+        .firstOrNull;
+  }
   if (isNonYoutubeId(songYtId)) return null;
   try {
     final song = await ytClient.videos.get(songYtId);
@@ -778,13 +881,13 @@ _selectedAudioStreams = {};
 
 const _maxSelectedAudioStreams = 50;
 
-String _selectedAudioStreamKey(String songId) =>
-    '${songId}_${audioQualitySetting.value}';
+String _selectedAudioStreamKey(String songId, [String? quality]) =>
+    '${songId}_${quality ?? audioQualitySetting.value}';
 
 /// Returns the stream resolved earlier for a song, unless it is old enough
 /// that its URL may have expired.
-AudioOnlyStreamInfo? _getSelectedAudioStream(String songId) {
-  final key = _selectedAudioStreamKey(songId);
+AudioOnlyStreamInfo? _getSelectedAudioStream(String songId, String quality) {
+  final key = _selectedAudioStreamKey(songId, quality);
   final entry = _selectedAudioStreams[key];
   if (entry == null) return null;
 
@@ -796,12 +899,16 @@ AudioOnlyStreamInfo? _getSelectedAudioStream(String songId) {
   return entry.stream;
 }
 
-void _cacheSelectedAudioStream(String songId, AudioOnlyStreamInfo stream) {
+void _cacheSelectedAudioStream(
+  String songId,
+  AudioOnlyStreamInfo stream,
+  String quality,
+) {
   if (_selectedAudioStreams.length >= _maxSelectedAudioStreams) {
     _selectedAudioStreams.remove(_selectedAudioStreams.keys.first);
   }
 
-  _selectedAudioStreams[_selectedAudioStreamKey(songId)] = (
+  _selectedAudioStreams[_selectedAudioStreamKey(songId, quality)] = (
     stream: stream,
     resolvedAt: DateTime.now(),
   );
@@ -810,19 +917,39 @@ void _cacheSelectedAudioStream(String songId, AudioOnlyStreamInfo stream) {
 /// Drops both cached forms of a song's stream, so the next request resolves
 /// it again. Used when a cached URL turns out to be dead.
 Future<void> invalidateSongStreamCache(String songId) async {
-  _selectedAudioStreams.remove(_selectedAudioStreamKey(songId));
-  await deleteData('cache', 'song_${songId}_${audioQualitySetting.value}_url');
+  for (final quality in ['low', 'medium', 'high']) {
+    _selectedAudioStreams.remove(_selectedAudioStreamKey(songId, quality));
+    await deleteData('cache', 'song_${songId}_${quality}_url');
+  }
 }
 
 /// Fetches the best available audio stream for a song.
-Future<AudioOnlyStreamInfo?> fetchBestAudioStream(String? songId) async {
+final _streamRequests = <String, Future<AudioOnlyStreamInfo?>>{};
+Future<AudioOnlyStreamInfo?> fetchBestAudioStream(
+  String? songId, {
+  String? quality,
+}) {
+  final selected = quality ?? audioQualitySetting.value;
+  final key = '${songId}_$selected';
+  return _streamRequests.putIfAbsent(
+    key,
+    () => _loadBestAudioStream(songId, selected).whenComplete(() {
+      _streamRequests.remove(key);
+    }),
+  );
+}
+
+Future<AudioOnlyStreamInfo?> _loadBestAudioStream(
+  String? songId,
+  String quality,
+) async {
   try {
-    if (songId == null || songId.isEmpty || isLocalTrackId(songId)) {
+    if (songId == null || songId.isEmpty) {
       logger.log('fetchBestAudioStream: songId is null or empty');
       return null;
     }
 
-    final cachedStream = _getSelectedAudioStream(songId);
+    final cachedStream = _getSelectedAudioStream(songId, quality);
     if (cachedStream != null) return cachedStream;
 
     final manifest = await _fetchStreamManifest(songId);
@@ -832,7 +959,10 @@ Future<AudioOnlyStreamInfo?> fetchBestAudioStream(String? songId) async {
       return null;
     }
 
-    final selectedStream = selectAudioOnlyStreamForQuality(audioStream);
+    final selectedStream = selectAudioOnlyStreamForQuality(
+      audioStream,
+      quality: quality,
+    );
     if (selectedStream == null) {
       logger.log(
         'fetchBestAudioStream: no compatible audio streams for $songId',
@@ -840,7 +970,7 @@ Future<AudioOnlyStreamInfo?> fetchBestAudioStream(String? songId) async {
       return null;
     }
 
-    _cacheSelectedAudioStream(songId, selectedStream);
+    _cacheSelectedAudioStream(songId, selectedStream, quality);
     return selectedStream;
   } on TimeoutException catch (_) {
     logger.log('fetchBestAudioStream request timed out for $songId');
@@ -856,7 +986,27 @@ Future<AudioOnlyStreamInfo?> fetchBestAudioStream(String? songId) async {
 }
 
 /// Resolves a playable stream URL for a song (cached when possible).
-Future<String?> fetchSongStreamUrl(String songId, bool isLive) async {
+final _urlRequests = <String, Future<String?>>{};
+Future<String?> fetchSongStreamUrl(
+  String songId,
+  bool isLive, {
+  String? quality,
+}) {
+  final selected = quality ?? audioQualitySetting.value;
+  final key = '${songId}_${isLive}_$selected';
+  return _urlRequests.putIfAbsent(
+    key,
+    () => _loadSongStreamUrl(songId, isLive, selected).whenComplete(() {
+      _urlRequests.remove(key);
+    }),
+  );
+}
+
+Future<String?> _loadSongStreamUrl(
+  String songId,
+  bool isLive,
+  String quality,
+) async {
   try {
     if (songId.isEmpty || isLocalTrackId(songId)) {
       logger.log('fetchSongStreamUrl: songId is empty');
@@ -869,7 +1019,7 @@ Future<String?> fetchSongStreamUrl(String songId, bool isLive) async {
     }
 
     const _cacheDuration = Duration(hours: 3);
-    final cacheKey = 'song_${songId}_${audioQualitySetting.value}_url';
+    final cacheKey = 'song_${songId}_${quality}_url';
 
     // Try to get from cache
     final cachedUrl = await _getCachedSongUrl(songId, cacheKey, _cacheDuration);
@@ -878,7 +1028,7 @@ Future<String?> fetchSongStreamUrl(String songId, bool isLive) async {
     }
 
     // Get fresh URL, reusing the stream already resolved for this song.
-    final selectedStream = await fetchBestAudioStream(songId);
+    final selectedStream = await fetchBestAudioStream(songId, quality: quality);
     if (selectedStream == null) {
       logger.log('fetchSongStreamUrl: no audio streams for $songId');
       return null;
@@ -943,7 +1093,10 @@ Future<Lyrics?> getSongLyricsResult(
   String? album,
 }) async {
   if (artist == null) return null;
-  final key = '$artist - $title';
+  final providerPreference = Hive.isBoxOpen('settings')
+      ? Hive.box('settings').get('lyricsExtension', defaultValue: 'automatic')
+      : 'automatic';
+  final key = '$artist - $title | ${album ?? ''} | $providerPreference';
   if (lastFetchedLyrics == key) return _lastLyricsResult;
 
   lyrics.value = null;
@@ -963,19 +1116,35 @@ Future<Lyrics?> getSongLyricsResult(
 }
 
 final Map<String, Future<bool>> _downloadJobs = {};
-Future<bool> makeSongOffline(dynamic song) {
+Future<bool> makeSongOffline(
+  dynamic song, {
+  String? quality,
+  Map? downloadTrack,
+  NativeExtensionService? sourceService,
+}) {
   if (song is! Map) return Future.value(false);
   final id = song['ytid']?.toString();
   if (id == null || id.isEmpty) return Future.value(false);
   return _downloadJobs.putIfAbsent(
     id,
-    () => _downloadSong(song).whenComplete(() {
-      _downloadJobs.remove(id);
-    }),
+    () =>
+        _downloadSong(
+          song,
+          quality: quality,
+          downloadTrack: downloadTrack,
+          sourceService: sourceService,
+        ).whenComplete(() {
+          _downloadJobs.remove(id);
+        }),
   );
 }
 
-Future<bool> _downloadSong(Map song) async {
+Future<bool> _downloadSong(
+  Map song, {
+  String? quality,
+  Map? downloadTrack,
+  NativeExtensionService? sourceService,
+}) async {
   File? staging;
   try {
     final id = song['ytid'].toString();
@@ -986,11 +1155,34 @@ Future<bool> _downloadSong(Map song) async {
     if (isLocalTrack(song))
       return await MusicStorageService.playbackPath(song) != null;
     final destination = MusicStorageService.downloadFolder;
-    final lossless = isExtensionTrack(song);
-    final manifest = lossless ? null : await fetchBestAudioStream(id);
-    if (!lossless && manifest == null) return false;
-    final container = lossless ? 'flac' : manifest!.container.name;
-    if (!{'mp4', 'webm', '3gpp', 'flac'}.contains(container)) return false;
+    final native = isNativeExtensionTrack(song);
+    final nativeService = sourceService ?? NativeExtensionService.instance;
+    final providerAudio = native
+        ? await nativeService.resolve(downloadTrack ?? song, quality: quality)
+        : null;
+    final lossless = isExtensionTrack(song) && !native;
+    final manifest = lossless || native
+        ? null
+        : await fetchBestAudioStream(id, quality: quality);
+    if (!lossless && !native && manifest == null) return false;
+    final container = native
+        ? providerAudio!['format'].toString()
+        : lossless
+        ? 'flac'
+        : manifest!.container.name;
+    if (!{
+      'mp4',
+      'm4a',
+      'mp3',
+      'aac',
+      'ogg',
+      'opus',
+      'wav',
+      'webm',
+      '3gpp',
+      'flac',
+    }.contains(container))
+      return false;
     final extension = container == 'mp4' ? 'm4a' : container;
     final filename = safeAudioFilename(
       '${song['artist'] ?? ''} - ${song['title'] ?? 'Track'}',
@@ -1002,7 +1194,13 @@ Future<bool> _downloadSong(Map song) async {
     staging = File(
       '$applicationDirPath/${FilePaths.tracksDir}/$storageId.partial',
     );
-    if (lossless) {
+    if (native) {
+      await nativeService.download(
+        downloadTrack ?? song,
+        providerAudio!,
+        staging,
+      );
+    } else if (lossless) {
       await FlacExtensionService.instance.download(song, staging);
     } else {
       final sink = staging.openWrite();
@@ -1030,27 +1228,74 @@ Future<bool> _downloadSong(Map song) async {
         staging,
         destination,
         filename,
-        container == 'flac'
-            ? 'audio/flac'
-            : container == 'webm'
-            ? 'audio/webm'
-            : container == '3gpp'
-            ? 'audio/3gpp'
-            : 'audio/mp4',
+        const {
+              'flac': 'audio/flac',
+              'webm': 'audio/webm',
+              '3gpp': 'audio/3gpp',
+              'mp3': 'audio/mpeg',
+              'aac': 'audio/aac',
+              'ogg': 'audio/ogg',
+              'opus': 'audio/ogg',
+              'wav': 'audio/wav',
+            }[container] ??
+            'audio/mp4',
       );
       offline.remove('audioPath');
       offline['fileOwnership'] = 'user-download';
     }
     if (manifest != null)
       offline['audioBitrateKbps'] = manifest.bitrate.kiloBitsPerSecond.round();
-    offline['audioCodec'] = lossless ? 'flac' : manifest!.audioCodec;
+    offline['audioCodec'] = native
+        ? providerAudio!['audio_codec'] ?? container
+        : lossless
+        ? 'flac'
+        : manifest!.audioCodec;
+    offline['downloadQuality'] =
+        quality ??
+        (native
+            ? providerAudio!['selectedQuality']
+            : audioQualitySetting.value);
+    if (native && downloadTrack == null && providerAudio!['track'] is Map) {
+      final metadata = NativeExtensionService.normalizeTrack(
+        song['extensionId'].toString(),
+        providerAudio['track'] as Map,
+      );
+      for (final key in [
+        'title',
+        'artist',
+        'album',
+        'isrc',
+        'highResImage',
+        'lowResImage',
+        'providerTrack',
+      ]) {
+        if (metadata[key] != null && metadata[key].toString().isNotEmpty)
+          offline[key] = metadata[key];
+      }
+    }
+    if (downloadTrack != null) {
+      offline['downloadSourceId'] = downloadTrack['extensionId'];
+      offline['downloadSourceTrackId'] = downloadTrack['providerTrackId'];
+    }
+    if (native)
+      offline['actualDownloadQuality'] =
+          providerAudio!['quality'] ??
+          providerAudio['audio_quality'] ??
+          providerAudio['format'];
     offline['dateAdded'] = DateTime.now().millisecondsSinceEpoch;
     final artworkPath = FilePaths.getArtworkPath(id);
     try {
       final image = offline['highResImage']?.toString();
       if (image != null && image.isNotEmpty) {
-        final artwork = await _downloadAndSaveArtworkFile(image, artworkPath);
-        if (artwork != null) offline['artworkPath'] = artwork.path;
+        final artwork = Uri.tryParse(image)?.scheme == providerArtworkScheme
+            ? await ProviderArtworkService.instance.load(image)
+            : await _downloadAndSaveArtworkFile(image, artworkPath);
+        if (artwork != null) {
+          final saved = Uri.tryParse(image)?.scheme == providerArtworkScheme
+              ? await artwork.copy(artworkPath)
+              : artwork;
+          offline['artworkPath'] = saved.path;
+        }
       }
     } catch (_) {
       /* Artwork is optional. */
@@ -1061,7 +1306,7 @@ Future<bool> _downloadSong(Map song) async {
         ..add(offline),
       onSaved: (next) => userOfflineSongs.value = next,
     );
-    unawaited(cacheSponsorBlockSegments(id));
+    if (!isNonYoutubeId(id)) unawaited(cacheSponsorBlockSegments(id));
     return true;
   } catch (e, st) {
     logger.log(
@@ -1292,7 +1537,10 @@ Future<void> updateRecentlyPlayed(dynamic songId, {Map? songFallback}) async {
         return;
       }
 
-      final newSongDetails = Map<String, dynamic>.from(fetchedSongDetails);
+      final newSongDetails = Map<String, dynamic>.from(fetchedSongDetails)
+        ..remove('_extensionHeaders')
+        ..remove('_streamHeaders')
+        ..remove('_resolvedStreamUrl');
       newSongDetails['ytid'] ??= songId;
       newSongDetails['listeningCount'] = 1;
       newSongDetails['lastPlayed'] = now;

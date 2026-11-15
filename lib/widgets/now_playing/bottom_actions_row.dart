@@ -25,12 +25,12 @@ import 'package:material_ui/material_ui.dart';
 import 'package:yazhal/extensions/l10n.dart';
 import 'package:yazhal/main.dart';
 import 'package:yazhal/services/common_services.dart';
-import 'package:yazhal/services/playlist_download_service.dart';
 import 'package:yazhal/services/settings_manager.dart';
 import 'package:yazhal/utilities/flutter_bottom_sheet.dart';
 import 'package:yazhal/utilities/flutter_toast.dart';
 import 'package:yazhal/utilities/mediaitem.dart';
 import 'package:yazhal/utilities/playlist_dialogs.dart';
+import 'package:yazhal/widgets/download_quality_dialog.dart';
 import 'package:yazhal/widgets/queue_list_view.dart';
 
 class BottomActionsRow extends StatefulWidget {
@@ -154,14 +154,15 @@ class _BottomActionsRowState extends State<BottomActionsRow> {
           if (!isRadioStation)
             _buildActionButton(
               context: context,
-              icon: FluentIcons.cloud_arrow_down_24_regular,
-              activeIcon: FluentIcons.cloud_off_24_filled,
+              icon: FluentIcons.arrow_download_24_regular,
+              activeIcon: FluentIcons.checkmark_circle_24_filled,
               colorScheme: colorScheme,
               size: responsiveIconSize,
               statusNotifier: _songOfflineStatus,
               onPressed: audioId == null
                   ? null
                   : () => _toggleOffline(
+                      context,
                       _songOfflineStatus,
                       audioId,
                       widget.metadata,
@@ -364,30 +365,35 @@ class _BottomActionsRowState extends State<BottomActionsRow> {
 }
 
 Future<void> _toggleOffline(
+  BuildContext context,
   ValueNotifier<bool> status,
   String? audioId,
   MediaItem metadata,
 ) async {
-  final originalValue = status.value;
-  status.value = !originalValue;
-
+  if (status.value) {
+    showToast(
+      context,
+      'Already downloaded. Manage downloaded songs from the Library.',
+    );
+    return;
+  }
+  final song = mediaItemToMap(metadata);
+  final quality = await chooseDownloadQuality(context, song);
+  if (quality == null) return;
   try {
-    final bool success;
-    if (originalValue) {
-      success =
-          !(audioId == null) &&
-          await OfflinePlaylistService().removeSongFromOfflineAndResync(
-            audioId,
-          );
-    } else {
-      success = await makeSongOffline(mediaItemToMap(metadata));
-    }
-    if (!success) {
-      status.value = originalValue;
-    }
-  } catch (e) {
-    status.value = originalValue;
-    logger.log('Error toggling offline status', error: e);
+    final success = await makeSongOffline(song, quality: quality);
+    if (success) status.value = true;
+    if (context.mounted)
+      showToast(
+        context,
+        success
+            ? 'Download saved'
+            : 'Download failed. Check the source and download folder.',
+      );
+  } catch (error) {
+    logger.log('Download failed', error: error);
+    if (context.mounted)
+      showToast(context, 'Download failed. Check the source.');
   }
 }
 

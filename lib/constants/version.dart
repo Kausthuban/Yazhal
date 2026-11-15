@@ -1,1 +1,1 @@
-const appVersion = '10.6.3 Yazhal';
+const appVersion = '10.8.3';

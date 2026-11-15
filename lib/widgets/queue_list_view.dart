@@ -51,6 +51,9 @@ class _QueueWidgetState extends State<QueueWidget> {
   @override
   void initState() {
     super.initState();
+    _queue = audioHandler.queue.valueOrNull == null
+        ? []
+        : List<Map>.from(audioHandler.sequence.entries);
     _subscription = audioHandler.queueAsMapStream.listen((queue) {
       if (mounted && !_isDismissing) {
         setState(() {
@@ -462,7 +465,11 @@ class QueueTile extends StatelessWidget {
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        song['artist']?.toString() ?? '',
+                        '${isCurrentSong
+                            ? 'Currently Playing'
+                            : index > audioHandler.currentQueueIndex
+                            ? 'Up Next · '
+                            : 'Played · '}${song['isManuallyAdded'] == true ? 'Manual · ' : ''}${song['artist'] ?? ''}',
                         style: TextStyle(
                           color: colorScheme.onSurfaceVariant,
                           fontSize: 12,

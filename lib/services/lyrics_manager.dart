@@ -23,11 +23,14 @@ import 'dart:collection';
 import 'dart:convert';
 import 'dart:developer' as developer;
 
+import 'package:hive_ce/hive_ce.dart';
 import 'package:html/parser.dart' as html_parser;
 import 'package:http/http.dart' as http;
+import 'package:yazhal/services/extensions/extension_lyrics_service.dart';
 import 'package:yazhal/services/lyrics/lrc_parser.dart';
 import 'package:yazhal/services/lyrics/lyrics_models.dart';
 import 'package:yazhal/services/lyrics/lyrics_query.dart';
+import 'package:yazhal/services/lyrics/offline_lyrics_store.dart';
 
 export 'package:yazhal/services/lyrics/lyrics_models.dart';
 
@@ -85,6 +88,9 @@ class LyricsManager {
       return null;
     }
 
+    if (Hive.isBoxOpen('settings') &&
+        Hive.box('settings').get('offlineMode', defaultValue: false) == true)
+      return OfflineLyricsStore.read(track);
     final variants = buildSearchVariants(track);
     if (variants.isEmpty) return null;
 
@@ -92,8 +98,16 @@ class LyricsManager {
     final cached = _readCache(cacheKey);
     if (cached != null) return cached.value;
 
-    final result = await _search(variants);
+    final result =
+        await ExtensionLyricsService.fetch(track) ?? await _search(variants);
     _writeCache(cacheKey, result);
+    if (result != null) {
+      try {
+        await OfflineLyricsStore.save(track, result);
+      } catch (_) {
+        /* Optional cache must not hide usable lyrics. */
+      }
+    }
     return result;
   }
 

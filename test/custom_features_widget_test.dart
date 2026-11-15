@@ -76,23 +76,24 @@ void main() {
               return SongSelectionRegion(
                 songs: filtered ? [a] : [a, b],
                 filter: filtered ? 'A' : '',
-                child: const SizedBox(),
+                child: SongBar(a, true, onPlay: () {}),
               );
             },
           ),
         ),
       );
-      await tester.tap(find.text('Select songs'));
+      await tester.longPress(find.text('A'));
       await tester.pump();
       await tester.tap(find.byTooltip('Select all visible'));
       await tester.pump();
       expect(find.text('2 selected'), findsOneWidget);
       redraw(() => filtered = true);
       await tester.pump();
-      expect(find.text('Select songs'), findsOneWidget);
+      expect(find.text('Select songs'), findsNothing);
+      expect(find.text('1 selected'), findsNothing);
       expect(find.text('2 selected'), findsNothing);
       // Externally owned lists have no removal button.
-      await tester.tap(find.text('Select songs'));
+      await tester.longPress(find.text('A'));
       await tester.pump();
       expect(find.byTooltip('Remove from playlist'), findsNothing);
     },
@@ -110,11 +111,11 @@ void main() {
           onRemove: (songs) async {
             removed = songs;
           },
-          child: const SizedBox(),
+          child: SongBar(song, true, onPlay: () {}),
         ),
       ),
     );
-    await tester.tap(find.text('Select songs'));
+    await tester.longPress(find.text('A'));
     await tester.pump();
     await tester.tap(find.byTooltip('Select all visible'));
     await tester.pump();
@@ -129,7 +130,8 @@ void main() {
     await tester.tap(find.widgetWithText(FilledButton, 'Remove from playlist'));
     await tester.pumpAndSettle();
     expect(removed, [song]);
-    expect(find.text('Select songs'), findsOneWidget);
+    expect(find.text('Select songs'), findsNothing);
+    expect(find.text('1 selected'), findsNothing);
   });
 
   testWidgets(

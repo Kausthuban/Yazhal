@@ -19,6 +19,10 @@ jobs:
           cache: true
       - run: flutter pub get
       - run: flutter analyze
+      - name: Build the native extension test runtime
+        run: python3 tool/build_extension_test_runtime.py
+      - name: Enable real QuickJS regression tests
+        run: echo "FLUTTER_QJS_NEXT_LIBRARY=$GITHUB_WORKSPACE/build/native_extensions/libflutter_qjs_next_plugin.so" >> "$GITHUB_ENV"
       # These two files need live YouTube responses or a Linux D-Bus session.
       - name: Run available regression tests
         shell: bash

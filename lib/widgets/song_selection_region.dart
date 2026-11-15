@@ -2,6 +2,8 @@ import 'package:material_ui/material_ui.dart';
 import 'package:yazhal/extensions/l10n.dart';
 import 'package:yazhal/main.dart';
 import 'package:yazhal/utilities/playlist_dialogs.dart';
+import 'package:yazhal/widgets/playback_context_scope.dart';
+import 'package:yazhal/widgets/selection_nav_host.dart';
 
 /// Keys are canonical row objects, not IDs or filtered row positions. This
 /// preserves distinct occurrences of a recording through sorting and filtering.
@@ -74,9 +76,17 @@ class SongSelectionRegion extends StatefulWidget {
 
 class _SongSelectionRegionState extends State<SongSelectionRegion> {
   final _selection = SongSelectionController();
+  late List<Map> _contextSongs;
+  late Set<Map> _available;
+  void _cacheRows() {
+    _contextSongs = widget.songs.whereType<Map>().toList();
+    _available = Set<Map>.identity()..addAll(_contextSongs);
+  }
+
   @override
   void initState() {
     super.initState();
+    _cacheRows();
     _selection.addListener(_changed);
   }
 
@@ -87,6 +97,7 @@ class _SongSelectionRegionState extends State<SongSelectionRegion> {
   @override
   void didUpdateWidget(SongSelectionRegion oldWidget) {
     super.didUpdateWidget(oldWidget);
+    _cacheRows();
     if (widget.filter != oldWidget.filter) {
       _selection.active = false;
       _selection.selected.clear();
@@ -97,6 +108,9 @@ class _SongSelectionRegionState extends State<SongSelectionRegion> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => publishSelectionNavigation(this, null),
+    );
     _selection.removeListener(_changed);
     _selection.dispose();
     super.dispose();
@@ -154,10 +168,76 @@ class _SongSelectionRegionState extends State<SongSelectionRegion> {
     }
   }
 
-  @override
-  Widget build(BuildContext context) {
+  Widget _actions(BuildContext context) {
     final l = context.l10n!;
     final enabled = !_selection.busy && _selection.selected.isNotEmpty;
+    return Material(
+      color: Theme.of(context).colorScheme.surfaceContainer,
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          child: Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 4,
+            children: [
+              IconButton(
+                onPressed: _selection.busy ? null : _selection.clear,
+                icon: const Icon(Icons.close),
+                tooltip: l.clearSelection,
+              ),
+              Text(l.selectedSongs(_selection.selected.length)),
+              IconButton(
+                onPressed: _selection.busy
+                    ? null
+                    : () {
+                        _selection.selectAll(widget.songs.whereType<Map>());
+                      },
+                icon: const Icon(Icons.select_all),
+                tooltip: l.selectAllVisible,
+              ),
+              IconButton(
+                onPressed: enabled
+                    ? () => showAddToPlaylistDialog(context, songs: _ordered)
+                    : null,
+                icon: const Icon(Icons.playlist_add),
+                tooltip: l.addToPlaylist,
+              ),
+              IconButton(
+                onPressed: enabled ? _queue : null,
+                icon: const Icon(Icons.queue_music),
+                tooltip: l.addToQueue,
+              ),
+              if (widget.onRemove != null)
+                IconButton(
+                  onPressed: enabled ? _remove : null,
+                  icon: const Icon(Icons.delete_outline),
+                  tooltip: l.removeFromPlaylist,
+                ),
+              if (_selection.busy)
+                const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (SelectionNavHost.enabledOf(context)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted)
+          publishSelectionNavigation(
+            this,
+            _selection.active ? _actions(context) : null,
+          );
+      });
+    }
     return PopScope(
       canPop: !_selection.active && !_selection.busy,
       onPopInvokedWithResult: (didPop, _) {
@@ -165,83 +245,17 @@ class _SongSelectionRegionState extends State<SongSelectionRegion> {
       },
       child: SongSelectionScope(
         controller: _selection,
-        available: Set<Map>.identity()..addAll(widget.songs.whereType<Map>()),
+        available: _available,
         child: Column(
           children: [
-            if (widget.songs.isNotEmpty)
-              Material(
-                color: Theme.of(context).colorScheme.surfaceContainer,
-                child: SafeArea(
-                  bottom: false,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 4,
-                    ),
-                    child: Wrap(
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      spacing: 4,
-                      children: [
-                        if (!_selection.active)
-                          TextButton.icon(
-                            onPressed: _selection.enter,
-                            icon: const Icon(Icons.checklist),
-                            label: Text(l.selectSongs),
-                          )
-                        else ...[
-                          IconButton(
-                            onPressed: _selection.busy
-                                ? null
-                                : _selection.clear,
-                            icon: const Icon(Icons.close),
-                            tooltip: l.clearSelection,
-                          ),
-                          Text(l.selectedSongs(_selection.selected.length)),
-                          IconButton(
-                            onPressed: _selection.busy
-                                ? null
-                                : () {
-                                    _selection.selectAll(
-                                      widget.songs.whereType<Map>(),
-                                    );
-                                  },
-                            icon: const Icon(Icons.select_all),
-                            tooltip: l.selectAllVisible,
-                          ),
-                          IconButton(
-                            onPressed: enabled
-                                ? () => showAddToPlaylistDialog(
-                                    context,
-                                    songs: _ordered,
-                                  )
-                                : null,
-                            icon: const Icon(Icons.playlist_add),
-                            tooltip: l.addToPlaylist,
-                          ),
-                          IconButton(
-                            onPressed: enabled ? _queue : null,
-                            icon: const Icon(Icons.queue_music),
-                            tooltip: l.addToQueue,
-                          ),
-                          if (widget.onRemove != null)
-                            IconButton(
-                              onPressed: enabled ? _remove : null,
-                              icon: const Icon(Icons.delete_outline),
-                              tooltip: l.removeFromPlaylist,
-                            ),
-                          if (_selection.busy)
-                            const SizedBox(
-                              width: 20,
-                              height: 20,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            ),
-                        ],
-                      ],
-                    ),
-                  ),
-                ),
+            Expanded(
+              child: PlaybackContextScope(
+                songs: _contextSongs,
+                child: widget.child,
               ),
-            Expanded(child: widget.child),
+            ),
+            if (_selection.active && !SelectionNavHost.enabledOf(context))
+              _actions(context),
           ],
         ),
       ),

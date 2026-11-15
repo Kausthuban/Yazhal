@@ -27,6 +27,7 @@ import 'package:yazhal/widgets/flip_card.dart';
 import 'package:yazhal/widgets/now_playing/bottom_actions_row.dart';
 import 'package:yazhal/widgets/now_playing/now_playing_artwork.dart';
 import 'package:yazhal/widgets/now_playing/now_playing_controls.dart';
+import 'package:yazhal/widgets/player_dismiss_gesture.dart';
 import 'package:yazhal/widgets/queue_list_view.dart';
 
 class NowPlayingPage extends StatefulWidget {
@@ -55,38 +56,40 @@ class _NowPlayingPageState extends State<NowPlayingPage> {
 
     return Scaffold(
       backgroundColor: colorScheme.surface,
-      body: SafeArea(
-        child: StreamBuilder<MediaItem?>(
-          stream: audioHandler.mediaItem,
-          builder: (context, snapshot) {
-            if (snapshot.data == null || !snapshot.hasData) {
-              return const Center(child: CircularProgressIndicator());
-            }
-            final metadata = snapshot.data!;
-            return Column(
-              children: [
-                _buildAppBar(context, colorScheme),
-                Expanded(
-                  child: isLargeScreen
-                      ? _DesktopLayout(
-                          metadata: metadata,
-                          size: size,
-                          adjustedIconSize: baseIconSize,
-                          adjustedMiniIconSize: miniIconSize,
-                          lyricsController: _lyricsController,
-                        )
-                      : _MobileLayout(
-                          metadata: metadata,
-                          size: size,
-                          adjustedIconSize: baseIconSize,
-                          adjustedMiniIconSize: miniIconSize,
-                          isLargeScreen: isLargeScreen,
-                          lyricsController: _lyricsController,
-                        ),
-                ),
-              ],
-            );
-          },
+      body: PlayerDismissGesture(
+        child: SafeArea(
+          child: StreamBuilder<MediaItem?>(
+            stream: audioHandler.mediaItem,
+            builder: (context, snapshot) {
+              if (snapshot.data == null || !snapshot.hasData) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              final metadata = snapshot.data!;
+              return Column(
+                children: [
+                  _buildAppBar(context, colorScheme),
+                  Expanded(
+                    child: isLargeScreen
+                        ? _DesktopLayout(
+                            metadata: metadata,
+                            size: size,
+                            adjustedIconSize: baseIconSize,
+                            adjustedMiniIconSize: miniIconSize,
+                            lyricsController: _lyricsController,
+                          )
+                        : _MobileLayout(
+                            metadata: metadata,
+                            size: size,
+                            adjustedIconSize: baseIconSize,
+                            adjustedMiniIconSize: miniIconSize,
+                            isLargeScreen: isLargeScreen,
+                            lyricsController: _lyricsController,
+                          ),
+                  ),
+                ],
+              );
+            },
+          ),
         ),
       ),
     );

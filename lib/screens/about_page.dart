@@ -27,6 +27,7 @@ import 'package:yazhal/extensions/l10n.dart';
 import 'package:yazhal/utilities/url_launcher.dart';
 import 'package:yazhal/widgets/fast_scroll.dart';
 import 'package:yazhal/widgets/mini_player_bottom_space.dart';
+import 'package:yazhal/widgets/source_credits.dart';
 
 class AboutPage extends StatelessWidget {
   const AboutPage({super.key});
@@ -166,6 +167,7 @@ class AboutPage extends StatelessWidget {
                   ),
                 ),
               ),
+              const SourceCredits(),
               const MiniPlayerBottomSpace(),
             ],
           ),

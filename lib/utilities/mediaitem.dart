@@ -20,8 +20,11 @@
  */
 
 import 'package:audio_service/audio_service.dart';
+import 'package:yazhal/services/catalog_metadata_service.dart';
 import 'package:yazhal/services/common_services.dart';
+import 'package:yazhal/services/extensions/provider_artwork_service.dart';
 import 'package:yazhal/utilities/media_duration.dart';
+import 'package:yazhal/utilities/provider_artwork.dart';
 
 Map mediaItemToMap(MediaItem mediaItem) {
   final extras = mediaItem.extras;
@@ -40,6 +43,8 @@ Map mediaItemToMap(MediaItem mediaItem) {
     for (final key in [
       'source',
       'extensionId',
+      'providerTrackId',
+      'providerTrack',
       'streamUrl',
       'format',
       'attribution',
@@ -49,6 +54,8 @@ Map mediaItemToMap(MediaItem mediaItem) {
   };
 }
 
+Uri? notificationArtworkUri;
+
 MediaItem mapToMediaItem(Map song) {
   final ytid = song['ytid']?.toString();
   final offlineSong = ytid != null
@@ -56,21 +63,28 @@ MediaItem mapToMediaItem(Map song) {
       : <String, dynamic>{};
   final isOffline = offlineSong.isNotEmpty;
 
+  final imageUrl = cleanArtwork(song['highResImage']);
+  final providerFile = Uri.tryParse(imageUrl)?.scheme == providerArtworkScheme
+      ? ProviderArtworkService.instance.cached(imageUrl)
+      : null;
   final artUri = isOffline && offlineSong['artworkPath'] != null
       ? Uri.file(offlineSong['artworkPath'].toString())
-      : (song['highResImage']?.toString().isNotEmpty == true
-            ? Uri.tryParse(song['highResImage'].toString())
-            : null);
+      : providerFile != null
+      ? Uri.file(providerFile.path)
+      : Uri.tryParse(imageUrl)?.scheme == providerArtworkScheme
+      ? null
+      : (imageUrl.isNotEmpty ? Uri.tryParse(imageUrl) : null);
 
   return MediaItem(
     id: song['id'].toString(),
     artist: (offlineSong['artist'] ?? song['artist'] ?? '').toString().trim(),
     album: (offlineSong['album'] ?? song['album'] ?? '').toString(),
     title: (offlineSong['title'] ?? song['title'] ?? '').toString(),
-    artUri: artUri,
+    artUri: artUri ?? notificationArtworkUri,
     duration: readMediaDuration(song['duration']),
     extras: {
-      'lowResImage': song['lowResImage'],
+      'lowResImage': cleanArtwork(song['lowResImage']),
+      'resolvedQuality': song['_resolvedQuality'],
       'ytid': song['ytid'],
       'artistId': song['artistId'],
       'videoAuthor': song['videoAuthor'],
@@ -78,6 +92,8 @@ MediaItem mapToMediaItem(Map song) {
       for (final key in [
         'source',
         'extensionId',
+        'providerTrackId',
+        'providerTrack',
         'streamUrl',
         'format',
         'attribution',
@@ -85,7 +101,9 @@ MediaItem mapToMediaItem(Map song) {
         if (song[key] != null) key: song[key],
       'highResImage': song['highResImage'],
       'artWorkPath':
-          (isOffline ? offlineSong['artworkPath'] : song['highResImage'])
+          (isOffline
+                  ? offlineSong['artworkPath']
+                  : providerFile?.path ?? song['highResImage'])
               ?.toString() ??
           '',
     },

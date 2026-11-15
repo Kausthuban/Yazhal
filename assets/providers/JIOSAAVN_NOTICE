@@ -1,0 +1,12 @@
+Mornye Extension
+Copyright 2026 zarzet
+
+This product includes software developed by zarzet.
+
+SPDX-License-Identifier: LGPL-3.0-only
+See LICENSE and COPYING for the complete terms.
+
+Yazhal modification: preserve source-declared language in formatSong for listening recommendations.
+Original adapter by HemanthJabalpuri; Mornye contributors; LGPL-3.0-only and incorporated GPL terms.
+Upstream registry SHA-256 e35852c5ced6b0ea651eea0867c5dac46c79482c4ae4602185186621b4044887.
+https://github.com/mornyeapp/Mornye-Extension

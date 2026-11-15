@@ -24,7 +24,10 @@ import 'dart:io';
 import 'package:audio_service/audio_service.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:material_ui/material_ui.dart';
+import 'package:yazhal/services/catalog_metadata_service.dart';
+import 'package:yazhal/utilities/provider_artwork.dart';
 import 'package:yazhal/widgets/no_artwork_cube.dart';
+import 'package:yazhal/widgets/provider_artwork.dart';
 import 'package:yazhal/widgets/spinner.dart';
 
 class SongArtworkWidget extends StatelessWidget {
@@ -42,6 +45,15 @@ class SongArtworkWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final sourceToken = metadata.extras?['highResImage']?.toString();
+    if (Uri.tryParse(sourceToken ?? '')?.scheme == providerArtworkScheme)
+      return ProviderArtwork(
+        token: sourceToken!,
+        size: size,
+        radius: borderRadius,
+      );
+    if (metadata.artUri == null || isYoutubeArtwork(metadata.artUri.toString()))
+      return NullArtworkWidget(iconSize: errorWidgetIconSize, size: size);
     return metadata.artUri?.scheme == 'file'
         ? SizedBox(
             width: size,
@@ -49,7 +61,10 @@ class SongArtworkWidget extends StatelessWidget {
             child: ClipRRect(
               borderRadius: BorderRadius.circular(borderRadius),
               child: Image.file(
-                File(metadata.extras?['artWorkPath']),
+                File(
+                  metadata.extras?['artWorkPath']?.toString() ??
+                      metadata.artUri!.toFilePath(),
+                ),
                 fit: BoxFit.cover,
               ),
             ),

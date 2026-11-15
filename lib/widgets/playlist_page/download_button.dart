@@ -25,8 +25,10 @@ import 'package:yazhal/extensions/l10n.dart';
 import 'package:yazhal/services/common_services.dart';
 import 'package:yazhal/services/playlist_download_service.dart';
 import 'package:yazhal/services/settings_manager.dart';
+import 'package:yazhal/utilities/download_quality.dart';
 import 'package:yazhal/utilities/flutter_toast.dart';
 import 'package:yazhal/utilities/offline_playlist_dialogs.dart';
+import 'package:yazhal/widgets/download_quality_dialog.dart';
 
 /// Downloads a playlist for offline playback, showing the download progress
 /// and turning into a "remove offline" button once every song is stored.
@@ -196,6 +198,22 @@ class _PlaylistDownloadButtonState extends State<PlaylistDownloadButton> {
       return;
     }
 
-    await offlinePlaylistService.downloadPlaylist(context, playlist);
+    final qualities = <String, String>{};
+    for (final song in (playlist['list'] as List? ?? []).whereType<Map>()) {
+      final source = downloadSourceKey(song);
+      if (source == 'local' ||
+          qualities.containsKey(source) ||
+          isSongAlreadyOffline(song['ytid']))
+        continue;
+      final quality = await chooseDownloadQuality(context, song);
+      if (quality == null || !context.mounted) return;
+      qualities[source] = quality;
+    }
+    if (!context.mounted) return;
+    await offlinePlaylistService.downloadPlaylist(
+      context,
+      playlist,
+      qualities: qualities,
+    );
   }
 }

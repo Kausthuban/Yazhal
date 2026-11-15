@@ -19,23 +19,24 @@
  *     please visit: https://github.com/Kausthuban/Yazhal
  */
 
-import 'package:audio_service/audio_service.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
 import 'package:go_router/go_router.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:yazhal/constants/app_constants.dart';
 import 'package:yazhal/extensions/l10n.dart';
 import 'package:yazhal/main.dart';
-import 'package:yazhal/screens/flac_extensions_page.dart';
+import 'package:yazhal/screens/headset_settings_page.dart';
 import 'package:yazhal/screens/local_music_page.dart';
 import 'package:yazhal/screens/local_sync_page.dart';
+import 'package:yazhal/screens/music_sources_page.dart';
+import 'package:yazhal/screens/playback_cache_page.dart';
 import 'package:yazhal/screens/search_page.dart';
+import 'package:yazhal/screens/source_help_page.dart';
+import 'package:yazhal/screens/stats_backup_page.dart';
 import 'package:yazhal/services/common_services.dart';
 import 'package:yazhal/services/data_manager.dart';
 import 'package:yazhal/services/listening_stats_service.dart';
-import 'package:yazhal/services/local_sync_service.dart';
 import 'package:yazhal/services/playlist_download_service.dart';
-import 'package:yazhal/services/playlists_manager.dart';
 import 'package:yazhal/services/router_service.dart';
 import 'package:yazhal/services/settings_manager.dart';
 import 'package:yazhal/theme/app_colors.dart';
@@ -52,6 +53,7 @@ import 'package:yazhal/widgets/fast_scroll.dart';
 import 'package:yazhal/widgets/mini_player_bottom_space.dart';
 import 'package:yazhal/widgets/section_header.dart';
 import 'package:yazhal/widgets/shapes/four_sided_cookie_shape.dart';
+import 'package:yazhal/widgets/streaming_settings.dart';
 
 class SettingsPage extends StatelessWidget {
   const SettingsPage({super.key});
@@ -145,6 +147,7 @@ class SettingsPage extends StatelessWidget {
           FluentIcons.music_note_1_24_regular,
           onTap: () => _showAudioQualityPicker(context),
         ),
+        const StreamingSettings(),
         if (isAndroidPlatform)
           CustomBar(
             context.l10n!.equalizer,
@@ -424,11 +427,11 @@ class SettingsPage extends StatelessWidget {
           ),
         ),
         CustomBar(
-          'FLAC sources & extensions',
+          'Music sources & repositories',
           FluentIcons.puzzle_piece_24_regular,
           onTap: () => Navigator.of(
             context,
-          ).push(MaterialPageRoute(builder: (_) => const FlacExtensionsPage())),
+          ).push(MaterialPageRoute(builder: (_) => const MusicSourcesPage())),
         ),
         CustomBar(
           context.l10n!.localMusic,
@@ -440,73 +443,6 @@ class SettingsPage extends StatelessWidget {
           context.l10n!.importSpotifyPlaylist,
           FluentIcons.arrow_upload_24_regular,
           onTap: () => context.push('/settings/import-spotify-playlist'),
-        ),
-        CustomBar(
-          context.l10n!.backupUserData,
-          FluentIcons.cloud_sync_24_regular,
-          onTap: () => _backupUserData(context),
-        ),
-        CustomBar(
-          context.l10n!.restoreUserData,
-          FluentIcons.cloud_add_24_regular,
-          onTap: () async {
-            var storageChanged = false;
-            try {
-              await LocalSyncService.instance.pauseForStorageRestore();
-              if (!context.mounted) return;
-              final result = await restoreData(
-                context,
-                onStorageChanged: (changed) => storageChanged = changed,
-              );
-              if (result.success) {
-                reloadSettingsFromStorage();
-                reloadSongLibraryStateFromStorage();
-                reloadPlaylistLibraryStateFromStorage();
-                reloadSearchHistoryFromStorage();
-                listeningStatsService.reload();
-                await audioHandler.setShuffleMode(
-                  shuffleNotifier.value
-                      ? AudioServiceShuffleMode.all
-                      : AudioServiceShuffleMode.none,
-                );
-                await audioHandler.setRepeatMode(repeatNotifier.value);
-                themeMode = getThemeMode(themeModeSetting);
-                brightness = getBrightnessFromThemeMode(themeMode);
-                if (context.mounted) {
-                  await Yazhal.updateAppState(
-                    context,
-                    newThemeMode: themeMode,
-                    newLocale: languageSetting,
-                    newAccentColor: primaryColorSetting,
-                    useSystemColor: useSystemColor.value,
-                  );
-                  NavigationManager.refreshRouter();
-                }
-              }
-              if (context.mounted) {
-                showToast(
-                  context,
-                  result.message,
-                  icon: result.success
-                      ? null
-                      : FluentIcons.error_circle_24_regular,
-                );
-              }
-            } catch (e, str) {
-              logger.log('Error restoring data', error: e, stackTrace: str);
-              if (context.mounted) {
-                showToast(
-                  context,
-                  context.l10n!.error,
-                  icon: FluentIcons.error_circle_24_regular,
-                );
-              }
-            } finally {
-              await LocalSyncService.instance.resumeAfterStorageRestore(
-                storageChanged: storageChanged,
-              );
-            }
-          },
         ),
         if (!isFdroidBuild && isMobilePlatform)
           CustomBar(
@@ -582,9 +518,44 @@ class SettingsPage extends StatelessWidget {
           icon: FluentIcons.more_circle_24_filled,
         ),
         CustomBar(
+          'Headset button actions',
+          FluentIcons.headphones_24_regular,
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute<void>(
+              builder: (_) => const HeadsetSettingsPage(),
+            ),
+          ),
+        ),
+        CustomBar(
+          'Playback buffer',
+          FluentIcons.storage_24_regular,
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute<void>(builder: (_) => const PlaybackCachePage()),
+          ),
+        ),
+        CustomBar(
+          'Source guide',
+          FluentIcons.question_circle_24_regular,
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute<void>(builder: (_) => const SourceHelpPage()),
+          ),
+        ),
+        CustomBar(
+          'Local statistics backup',
+          FluentIcons.save_24_regular,
+          borderRadius: commonCustomBarRadiusFirst,
+          description: 'Export, share or restore a statistics file. No login.',
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute<void>(builder: (_) => const StatsBackupPage()),
+          ),
+        ),
+        CustomBar(
           context.l10n!.licenses,
           FluentIcons.document_24_regular,
-          borderRadius: commonCustomBarRadiusFirst,
           onTap: () => NavigationManager.router.go('/settings/license'),
         ),
         CustomBar(
@@ -1016,27 +987,5 @@ class SettingsPage extends StatelessWidget {
         );
       },
     );
-  }
-
-  Future<void> _backupUserData(BuildContext context) async {
-    try {
-      final result = await backupData(context);
-      if (context.mounted) {
-        showToast(
-          context,
-          result.message,
-          icon: result.success ? null : FluentIcons.error_circle_24_regular,
-        );
-      }
-    } catch (e, stackTrace) {
-      logger.log('Error backing up data', error: e, stackTrace: stackTrace);
-      if (context.mounted) {
-        showToast(
-          context,
-          context.l10n!.error,
-          icon: FluentIcons.error_circle_24_regular,
-        );
-      }
-    }
   }
 }

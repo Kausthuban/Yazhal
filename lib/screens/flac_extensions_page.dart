@@ -1,7 +1,9 @@
 import 'dart:convert';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:hive_ce/hive_ce.dart';
 import 'package:material_ui/material_ui.dart';
+import 'package:yazhal/screens/source_repositories_page.dart';
 import 'package:yazhal/services/flac_extension_service.dart';
 import 'package:yazhal/services/settings_manager.dart' show offlineMode;
 import 'package:yazhal/widgets/fast_scroll.dart';
@@ -57,7 +59,7 @@ class _FlacExtensionsPageState extends State<FlacExtensionsPage> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('FLAC sources & extensions')),
+    appBar: AppBar(title: const Text('Music sources & extensions')),
     body: FastScroll(
       builder: (controller) => ListView(
         controller: controller,
@@ -72,6 +74,16 @@ class _FlacExtensionsPageState extends State<FlacExtensionsPage> {
             child: Text(
               'Enable a source to search for actual FLAC files. The built-in catalog covers live recordings. Availability depends on each source; standard search remains available.',
             ),
+          ),
+          OutlinedButton.icon(
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute<void>(
+                builder: (_) => const SourceRepositoriesPage(),
+              ),
+            ),
+            icon: const Icon(Icons.source),
+            label: const Text('Source repositories'),
           ),
           FilledButton.icon(
             onPressed: _install,
@@ -134,6 +146,9 @@ class _FlacSearchPageState extends State<FlacSearchPage> {
   List<Map<String, dynamic>> _songs = [];
   bool _busy = false;
   String? _status;
+  String _source = Hive.box('settings')
+      .get('catalogSearchSource', defaultValue: 'all')
+      .toString();
   @override
   void dispose() {
     query.dispose();
@@ -146,8 +161,13 @@ class _FlacSearchPageState extends State<FlacSearchPage> {
       setState(() => _status = 'Turn off offline mode to search FLAC sources.');
       return;
     }
+    if (_source != 'all' &&
+        !FlacExtensionService.extensions.any(
+          (e) => e.enabled && e.id == _source,
+        ))
+      _source = 'all';
     final sources = FlacExtensionService.extensions
-        .where((e) => e.enabled)
+        .where((e) => e.enabled && (_source == 'all' || e.id == _source))
         .toList();
     if (sources.isEmpty) {
       setState(
@@ -209,6 +229,37 @@ class _FlacSearchPageState extends State<FlacSearchPage> {
           controller: controller,
           padding: const EdgeInsets.all(16),
           children: [
+            DropdownButtonFormField<String>(
+              initialValue:
+                  FlacExtensionService.extensions.any(
+                    (e) => e.enabled && e.id == _source,
+                  )
+                  ? _source
+                  : 'all',
+              decoration: const InputDecoration(labelText: 'Search source'),
+              items: [
+                const DropdownMenuItem(
+                  value: 'all',
+                  child: Text('All enabled catalogs'),
+                ),
+                ...FlacExtensionService.extensions
+                    .where((e) => e.enabled)
+                    .map(
+                      (e) => DropdownMenuItem(value: e.id, child: Text(e.name)),
+                    ),
+              ],
+              onChanged: _busy
+                  ? null
+                  : (value) async {
+                      setState(() {
+                        _source = value ?? 'all';
+                        _songs = [];
+                        _status = null;
+                      });
+                      await Hive.box('settings')
+                          .put('catalogSearchSource', _source);
+                    },
+            ),
             TextField(
               controller: query,
               enabled: !_busy,

@@ -80,9 +80,9 @@ Map<String, dynamic> returnSongLayout(
     'artist': artist,
     'artistId': song.channelId.toString(),
     'videoAuthor': song.author,
-    'image': playlistImage ?? song.thumbnails.standardResUrl,
-    'lowResImage': playlistImage ?? song.thumbnails.lowResUrl,
-    'highResImage': playlistImage ?? song.thumbnails.maxResUrl,
+    'image': '',
+    'lowResImage': '',
+    'highResImage': '',
     'duration': song.duration?.inSeconds,
     'isLive': song.isLive,
   };

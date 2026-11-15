@@ -37,7 +37,6 @@ import 'package:yazhal/services/settings_manager.dart';
 import 'package:yazhal/utilities/app_utils.dart';
 import 'package:yazhal/utilities/flutter_toast.dart';
 import 'package:yazhal/utilities/local_tracks.dart';
-import 'package:yazhal/utilities/playlist_utils.dart';
 import 'package:yazhal/utilities/song_filtering.dart';
 import 'package:yazhal/utilities/sort_utils.dart';
 import 'package:yazhal/widgets/edit_playlist_dialog.dart';
@@ -721,24 +720,17 @@ class _PlaylistPageState extends State<PlaylistPage> {
     final borderRadius = getItemBorderRadius(index, totalItems);
     final isUserCreatedPlaylist = _playlist?['source'] == 'user-created';
     final playlistId = isUserCreatedPlaylist ? _playlist!['ytid'] : null;
-    final isSearching = _searchQueryNotifier.value.isNotEmpty;
-    final fullIndex = isSearching
-        ? PlaylistUtils.findSongIndexByYtid(_playlist, song['ytid'])
-        : index;
-
-    if (isSearching && fullIndex == -1) {
-      logger.log('Warning: Song ${song['ytid']} not found in full playlist');
-    }
-
     return SongBar(
       song,
       true,
       key: listItemKey('playlist_song', index, song),
-      onRemove: (isRemovable && !isSearching) ? () => _removeSong(song) : null,
+      onRemove: (isRemovable && _searchQueryNotifier.value.isEmpty)
+          ? () => _removeSong(song)
+          : null,
       onPlay: () {
         audioHandler.playPlaylistSong(
-          playlist: _playlist,
-          songIndex: fullIndex != -1 ? fullIndex : index,
+          playlist: {...?_playlist, 'list': sourceList},
+          songIndex: index,
         );
       },
       borderRadius: borderRadius,

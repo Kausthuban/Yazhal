@@ -50,6 +50,13 @@ class MainActivity : AudioServiceActivity() {
                                     Charsets.UTF_8.newDecoder().decode(java.nio.ByteBuffer.wrap(bytes)).toString()
                                 }
                             }
+                            "preparePlaybackUri" -> {
+                                val uri = Uri.parse(call.argument<String>("uri")!!)
+                                contentResolver.openAssetFileDescriptor(uri, "r").use { descriptor ->
+                                    requireNotNull(descriptor) { "File is unavailable; select the folder again" }
+                                }
+                                uri.toString()
+                            }
                             "preparePlayback" -> preparePlayback(Uri.parse(call.argument<String>("uri")!!))
                             "publishDownload" -> publishDownload(Uri.parse(call.argument<String>("tree")!!),
                                 File(call.argument<String>("path")!!), call.argument<String>("name")!!, call.argument<String>("mime")!!)
@@ -102,6 +109,19 @@ class MainActivity : AudioServiceActivity() {
                             metadata.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)?.takeIf { it.isNotBlank() }?.let { entry["title"] = it }
                             entry["artist"] = metadata.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)
                             entry["album"] = metadata.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM)
+                            mapOf(
+                                "albumArtist" to MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST,
+                                "genre" to MediaMetadataRetriever.METADATA_KEY_GENRE,
+                                "year" to MediaMetadataRetriever.METADATA_KEY_YEAR,
+                                "trackNumber" to MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER,
+                                "discNumber" to MediaMetadataRetriever.METADATA_KEY_DISC_NUMBER,
+                                "composer" to MediaMetadataRetriever.METADATA_KEY_COMPOSER,
+                                "writer" to MediaMetadataRetriever.METADATA_KEY_WRITER,
+                                "mimeType" to MediaMetadataRetriever.METADATA_KEY_MIMETYPE,
+                                "bitrate" to MediaMetadataRetriever.METADATA_KEY_BITRATE
+                            ).forEach { (key, tag) ->
+                                metadata.extractMetadata(tag)?.takeIf { it.isNotBlank() }?.let { entry[key] = it }
+                            }
                             metadata.embeddedPicture?.takeIf { it.size <= 6 * 1024 * 1024 }?.let { bytes ->
                                 val artDir = File(filesDir, "embedded_art").apply { mkdirs() }
                                 val key = java.security.MessageDigest.getInstance("SHA-256").digest(uri.toString().toByteArray()).joinToString("") { "%02x".format(it) }

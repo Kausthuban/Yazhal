@@ -20,6 +20,7 @@
  */
 
 import 'dart:async';
+import 'dart:io';
 
 import 'package:app_links/app_links.dart';
 import 'package:audio_service/audio_service.dart';
@@ -36,6 +37,7 @@ import 'package:yazhal/extensions/l10n.dart';
 import 'package:yazhal/localization/app_localizations.dart';
 import 'package:yazhal/screens/local_sync_page.dart';
 import 'package:yazhal/services/audio_service.dart';
+import 'package:yazhal/services/bundled_providers.dart';
 import 'package:yazhal/services/data_manager.dart';
 import 'package:yazhal/services/desktop_media_artwork.dart';
 import 'package:yazhal/services/io_service.dart';
@@ -53,9 +55,11 @@ import 'package:yazhal/services/windows_media_controls.dart';
 import 'package:yazhal/theme/app_themes.dart';
 import 'package:yazhal/utilities/flutter_toast.dart';
 import 'package:yazhal/utilities/language_utils.dart';
+import 'package:yazhal/utilities/mediaitem.dart';
 import 'package:yazhal/utilities/platform_utils.dart';
 import 'package:yazhal/utilities/playlist_utils.dart';
 import 'package:yazhal/utilities/sharing_intent.dart';
+import 'package:yazhal/widgets/startup_gate.dart';
 
 late YazhalAudioHandler audioHandler;
 LinuxMediaControls? linuxMediaControls;
@@ -300,13 +304,12 @@ class _YazhalState extends State<Yazhal> with WidgetsBindingObserver {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await initialisation();
-
-  runApp(const Yazhal());
+  runApp(const StartupGate(initialize: initialisation, child: Yazhal()));
 }
 
 Future<void> initialisation() async {
   try {
+    final startup = Stopwatch()..start();
     await Hive.initFlutter();
 
     await Future.wait([
@@ -320,7 +323,18 @@ Future<void> initialisation() async {
     unawaited(cleanupOldCacheEntries());
 
     try {
-      await LocalSyncService.instance.initialise();
+      unawaited(
+        LocalSyncService.instance.initialise().catchError((
+          Object error,
+          StackTrace stack,
+        ) {
+          logger.log(
+            'Local sync could not start',
+            error: error,
+            stackTrace: stack,
+          );
+        }),
+      );
     } catch (e, stackTrace) {
       logger.log(
         'Local sync could not start',
@@ -335,7 +349,7 @@ Future<void> initialisation() async {
         config: const AudioServiceConfig(
           androidNotificationChannelId: 'com.kausthuban.yazhal',
           androidNotificationChannelName: 'Yazhal',
-          androidNotificationIcon: 'drawable/ic_launcher_foreground',
+          androidNotificationIcon: 'drawable/ic_stat_yazhal',
           androidShowNotificationBadge: true,
           androidStopForegroundOnPause: false,
           // Handed to Android Auto on the browsable root. Without the search
@@ -429,6 +443,7 @@ Future<void> initialisation() async {
       }
     }
 
+    logger.log('Core startup ready in ${startup.elapsedMilliseconds} ms');
     // Init router
     NavigationManager.instance;
 
@@ -449,10 +464,36 @@ Future<void> initialisation() async {
     }
   } catch (e, stackTrace) {
     logger.log('Initialization Error', error: e, stackTrace: stackTrace);
+    rethrow;
   }
 
   applicationDirPath = (await getApplicationDocumentsDirectory()).path;
   await FilePaths.ensureDirectoriesExist();
+  try {
+    final brand = File(
+      '$applicationDirPath/${FilePaths.artworksDir}/yazhal_notification.png',
+    );
+    if (!await brand.exists()) {
+      final bytes = await rootBundle.load('assets/icons/yazhal_icon.png');
+      await brand.writeAsBytes(
+        bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
+        flush: true,
+      );
+    }
+    notificationArtworkUri = brand.uri;
+  } catch (error, stack) {
+    logger.log(
+      'Notification artwork unavailable',
+      error: error,
+      stackTrace: stack,
+    );
+  }
+
+  try {
+    await BundledProviders.ensure();
+  } catch (error, stack) {
+    logger.log('Default source setup failed', error: error, stackTrace: stack);
+  }
 }
 
 void handleIncomingLink(Uri? uri) async {

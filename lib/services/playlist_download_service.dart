@@ -34,6 +34,7 @@ import 'package:yazhal/services/data_manager.dart';
 import 'package:yazhal/services/io_service.dart';
 import 'package:yazhal/services/music_storage_service.dart';
 import 'package:yazhal/services/playlists_manager.dart';
+import 'package:yazhal/utilities/download_quality.dart';
 import 'package:yazhal/utilities/flutter_toast.dart';
 import 'package:yazhal/utilities/local_tracks.dart';
 
@@ -108,7 +109,11 @@ class OfflinePlaylistService {
     );
   }
 
-  Future<void> downloadPlaylist(BuildContext context, Map playlist) async {
+  Future<void> downloadPlaylist(
+    BuildContext context,
+    Map playlist, {
+    Map<String, String> qualities = const {},
+  }) async {
     final playlistId = playlist['ytid'] as String? ?? playlist['title'];
 
     if (playlistId == null || playlistId.isEmpty) {
@@ -143,7 +148,7 @@ class OfflinePlaylistService {
 
       await Future.wait([
         for (var i = 0; i < workerCount; i++)
-          _processDownloadQueue(songQueue, progressNotifier),
+          _processDownloadQueue(songQueue, progressNotifier, qualities),
       ]).timeout(
         Duration(minutes: songsList.length * 2),
         onTimeout: () {
@@ -543,6 +548,7 @@ class OfflinePlaylistService {
   Future<void> _processDownloadQueue(
     Queue<dynamic> songQueue,
     ValueNotifier<DownloadProgress> progressNotifier,
+    Map<String, String> qualities,
   ) async {
     while (songQueue.isNotEmpty && !progressNotifier.value.isCancelled) {
       final song = songQueue.removeFirst();
@@ -570,7 +576,10 @@ class OfflinePlaylistService {
           progressNotifier.value.completed++;
           progressNotifier.notifyListeners();
         } else {
-          final success = await makeSongOffline(song);
+          final success = await makeSongOffline(
+            song,
+            quality: qualities[downloadSourceKey(Map.from(song as Map))],
+          );
           if (success) {
             progressNotifier.value.completed++;
           } else {

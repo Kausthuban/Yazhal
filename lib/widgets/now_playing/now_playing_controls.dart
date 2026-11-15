@@ -450,9 +450,7 @@ class _PlaybackControlsRow extends StatelessWidget {
                 children: [
                   _PlaybackControlButton(
                     icon: FluentIcons.previous_24_regular,
-                    isEnabled:
-                        audioHandler.hasPrevious ||
-                        repeatMode != AudioServiceRepeatMode.none,
+                    isEnabled: audioHandler.sequence.current != null,
                     tooltip: context.l10n!.skipToPrevious,
                     onPressed: () => audioHandler.skipToPrevious(),
                     colorScheme: colorScheme,
@@ -471,13 +469,9 @@ class _PlaybackControlsRow extends StatelessWidget {
                   SizedBox(width: buttonSpacing),
                   _PlaybackControlButton(
                     icon: FluentIcons.next_24_regular,
-                    isEnabled:
-                        audioHandler.hasNext ||
-                        repeatMode == AudioServiceRepeatMode.one,
+                    isEnabled: audioHandler.canSkipToNext,
                     tooltip: context.l10n!.skipToNext,
-                    onPressed: () => repeatMode == AudioServiceRepeatMode.one
-                        ? audioHandler.playAgain()
-                        : audioHandler.skipToNext(),
+                    onPressed: () => audioHandler.skipToNext(),
                     colorScheme: colorScheme,
                     buttonConstraints: buttonConstraints,
                     buttonPadding: buttonPadding,

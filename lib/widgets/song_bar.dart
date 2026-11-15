@@ -29,7 +29,10 @@ import 'package:go_router/go_router.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:yazhal/extensions/l10n.dart';
 import 'package:yazhal/main.dart';
+import 'package:yazhal/screens/track_information_page.dart';
+import 'package:yazhal/services/catalog_metadata_service.dart';
 import 'package:yazhal/services/common_services.dart';
+import 'package:yazhal/services/extensions/native_extension_service.dart';
 import 'package:yazhal/services/playlist_download_service.dart';
 import 'package:yazhal/services/playlists_manager.dart';
 import 'package:yazhal/services/router_service.dart';
@@ -37,10 +40,15 @@ import 'package:yazhal/services/settings_manager.dart';
 import 'package:yazhal/utilities/flutter_toast.dart';
 import 'package:yazhal/utilities/formatter.dart';
 import 'package:yazhal/utilities/playlist_dialogs.dart';
+import 'package:yazhal/utilities/provider_artwork.dart';
+import 'package:yazhal/widgets/download_quality_dialog.dart';
+import 'package:yazhal/widgets/extension_audio_source_dialog.dart';
 import 'package:yazhal/widgets/no_artwork_cube.dart';
 import 'package:yazhal/widgets/offline_metadata_dialog.dart';
 import 'package:yazhal/widgets/overflow_menu_button.dart';
+import 'package:yazhal/widgets/playback_context_scope.dart';
 import 'package:yazhal/widgets/popup_menu_item.dart';
+import 'package:yazhal/widgets/provider_artwork.dart';
 import 'package:yazhal/widgets/rename_song_dialog.dart';
 import 'package:yazhal/widgets/song_selection_region.dart';
 
@@ -69,6 +77,12 @@ List<PopupMenuEntry<String>> _buildSongMenuItems({
   final renameSongText = l10n.renameSong;
 
   return [
+    buildPopupMenuItem<String>(
+      value: 'track_info',
+      icon: Icons.info_outline,
+      label: 'Track information & lyrics',
+      colorScheme: colorScheme,
+    ),
     if (songOfflineStatus.value)
       buildPopupMenuItem<String>(
         value: 'metadata',
@@ -186,6 +200,14 @@ Future<void> _handleSongMenuAction({
   FutureOr<void> Function()? onRename,
 }) async {
   switch (value) {
+    case 'track_info':
+      await Navigator.push(
+        context,
+        MaterialPageRoute<void>(
+          builder: (_) => TrackInformationPage(song: Map.from(song as Map)),
+        ),
+      );
+      break;
     case 'metadata':
       await showOfflineMetadata(context, song as Map);
       break;
@@ -281,8 +303,29 @@ Future<void> _toggleSongOfflineStatus(
         showToast(context, context.l10n!.songRemovedFromOffline);
       }
     } else {
+      Map? audioTrack;
+      if (isNativeExtensionTrack(song as Map)) {
+        final provider = NativeExtensionService.installed
+            .where((p) => p['id'] == song['extensionId'])
+            .firstOrNull;
+        if (!((provider?['manifest'] as Map?)?['type'] as List? ?? []).contains(
+          'download_provider',
+        )) {
+          audioTrack = await chooseAudioSourceTrack(context, song);
+          if (audioTrack == null || !context.mounted) return;
+        }
+      }
+      final quality = await chooseDownloadQuality(
+        context,
+        audioTrack ?? Map.from(song),
+      );
+      if (quality == null) return;
       songDownloadStatus.value = true;
-      success = await makeSongOffline(song);
+      success = await makeSongOffline(
+        song,
+        quality: quality,
+        downloadTrack: audioTrack,
+      );
       if (success && context.mounted) {
         showToast(context, context.l10n!.songAddedToOffline);
       }
@@ -363,7 +406,7 @@ class _SongBarState extends State<SongBar> {
   late String _songTitle;
   late String _songArtist;
   late String? _artworkPath;
-  late final String _lowResImageUrl;
+  late String _lowResImageUrl;
   late final String _ytid;
 
   @override
@@ -377,13 +420,14 @@ class _SongBarState extends State<SongBar> {
       widget.song['artworkPath'],
       widget.song['artWorkPath'],
     ]);
-    _lowResImageUrl =
-        _firstNonEmptyString([
-          widget.song['lowResImage'],
-          widget.song['image'],
-          widget.song['highResImage'],
-        ]) ??
-        '';
+    _lowResImageUrl = cleanArtwork(
+      _firstNonEmptyString([
+            widget.song['lowResImage'],
+            widget.song['image'],
+            widget.song['highResImage'],
+          ]) ??
+          '',
+    );
     _ytid = widget.song['ytid'] ?? '';
 
     // Initialize ValueNotifiers only once
@@ -424,6 +468,14 @@ class _SongBarState extends State<SongBar> {
   void didUpdateWidget(SongBar oldWidget) {
     super.didUpdateWidget(oldWidget);
 
+    _lowResImageUrl = cleanArtwork(
+      _firstNonEmptyString([
+            widget.song['lowResImage'],
+            widget.song['image'],
+            widget.song['highResImage'],
+          ]) ??
+          '',
+    );
     // Update cached title and artist if they changed
     final saved = getOfflineSongByYtid(_ytid);
     final newTitle = saved['title'] ?? widget.song['title'] ?? '';
@@ -516,6 +568,33 @@ class _SongBarState extends State<SongBar> {
                 ),
               ),
 
+              if (!selecting)
+                ValueListenableBuilder<bool>(
+                  valueListenable: _songLikeStatus,
+                  builder: (context, liked, _) => IconButton(
+                    tooltip: liked
+                        ? 'Remove from favourites'
+                        : 'Add to favourites',
+                    icon: Icon(
+                      liked ? Icons.favorite : Icons.favorite_border,
+                      size: 22,
+                    ),
+                    color: liked
+                        ? colorScheme.primary
+                        : colorScheme.onSurfaceVariant,
+                    onPressed: () async {
+                      await _handleSongMenuAction(
+                        context: context,
+                        value: 'like',
+                        song: widget.song,
+                        ytid: _ytid,
+                        songLikeStatus: _songLikeStatus,
+                        songOfflineStatus: _songOfflineStatus,
+                        songDownloadStatus: _songDownloadStatus,
+                      );
+                    },
+                  ),
+                ),
               if (selecting)
                 const SizedBox.shrink()
               else if (widget.onAdd != null)
@@ -565,11 +644,33 @@ class _SongBarState extends State<SongBar> {
       return;
     }
 
-    if (widget.clearPlaylist) {
-      audioHandler.addPlaylistToQueue([widget.song], replace: true);
-    } else {
-      audioHandler.playSong(widget.song);
+    if (isNativeExtensionTrack(widget.song as Map)) {
+      final provider = NativeExtensionService.installed
+          .where((p) => p['id'] == widget.song['extensionId'])
+          .firstOrNull;
+      final types = (provider?['manifest'] as Map?)?['type'] as List? ?? [];
+      if (!types.contains('download_provider')) {
+        Navigator.push(
+          context,
+          MaterialPageRoute<void>(
+            builder: (_) => TrackInformationPage(
+              song: Map<String, dynamic>.from(widget.song as Map),
+            ),
+          ),
+        );
+        return;
+      }
     }
+    final scope = PlaybackContextScope.maybeOf(context);
+    final songs = scope?.songs ?? [widget.song as Map];
+    var index = songs.indexWhere((s) => identical(s, widget.song));
+    if (index < 0) index = songs.indexWhere((s) => s['ytid'] == _ytid);
+    unawaited(
+      audioHandler.playPlaylistSong(
+        playlist: {'title': scope?.title ?? '', 'list': songs},
+        songIndex: index < 0 ? 0 : index,
+      ),
+    );
   }
 
   Widget _buildAlbumArt(ColorScheme colorScheme) {
@@ -806,6 +907,8 @@ class _OfflineArtwork extends StatelessWidget {
           children: [
             Image.file(
               File(artworkPath),
+              cacheWidth: 192,
+              cacheHeight: 192,
               width: size,
               height: size,
               fit: BoxFit.cover,
@@ -865,68 +968,74 @@ class _OnlineArtwork extends StatelessWidget {
       child: Stack(
         alignment: Alignment.center,
         children: <Widget>[
-          CachedNetworkImage(
-            imageUrl: lowResImageUrl,
-            width: size,
-            height: size,
-            fit: BoxFit.cover,
-            memCacheWidth: 256,
-            memCacheHeight: 256,
-            imageBuilder: (context, imageProvider) => ClipRRect(
-              borderRadius: BorderRadius.circular(10),
-              child: Stack(
-                children: [
-                  Image(
-                    image: imageProvider,
-                    fit: isImageSmall ? BoxFit.fill : BoxFit.cover,
-                    width: size,
-                    height: size,
-                    centerSlice: isImageSmall
-                        ? const Rect.fromLTRB(1, 1, 1, 1)
-                        : null,
-                  ),
-                  if (isOffline)
-                    Positioned(
-                      top: 3,
-                      right: 3,
-                      child: Container(
-                        width: 20,
-                        height: 20,
-                        decoration: BoxDecoration(
-                          color: colorScheme.tertiaryContainer,
-                          shape: BoxShape.circle,
-                        ),
-                        child: Icon(
-                          FluentIcons.cloud_off_24_filled,
-                          size: 11,
-                          color: colorScheme.onTertiaryContainer,
-                        ),
-                      ),
-                    )
-                  else if (isLiked)
-                    Positioned(
-                      top: 3,
-                      right: 3,
-                      child: Container(
-                        width: 20,
-                        height: 20,
-                        decoration: BoxDecoration(
-                          color: colorScheme.primaryContainer,
-                          shape: BoxShape.circle,
-                        ),
-                        child: Icon(
-                          FluentIcons.heart_24_filled,
-                          size: 11,
-                          color: colorScheme.onPrimaryContainer,
-                        ),
-                      ),
+          if (lowResImageUrl.isEmpty)
+            NullArtworkWidget(iconSize: 30, size: size)
+          else if (Uri.tryParse(lowResImageUrl)?.scheme ==
+              providerArtworkScheme)
+            ProviderArtwork(token: lowResImageUrl, size: size)
+          else
+            CachedNetworkImage(
+              imageUrl: lowResImageUrl,
+              width: size,
+              height: size,
+              fit: BoxFit.cover,
+              memCacheWidth: 256,
+              memCacheHeight: 256,
+              imageBuilder: (context, imageProvider) => ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: Stack(
+                  children: [
+                    Image(
+                      image: imageProvider,
+                      fit: isImageSmall ? BoxFit.fill : BoxFit.cover,
+                      width: size,
+                      height: size,
+                      centerSlice: isImageSmall
+                          ? const Rect.fromLTRB(1, 1, 1, 1)
+                          : null,
                     ),
-                ],
+                    if (isOffline)
+                      Positioned(
+                        top: 3,
+                        right: 3,
+                        child: Container(
+                          width: 20,
+                          height: 20,
+                          decoration: BoxDecoration(
+                            color: colorScheme.tertiaryContainer,
+                            shape: BoxShape.circle,
+                          ),
+                          child: Icon(
+                            FluentIcons.cloud_off_24_filled,
+                            size: 11,
+                            color: colorScheme.onTertiaryContainer,
+                          ),
+                        ),
+                      )
+                    else if (isLiked)
+                      Positioned(
+                        top: 3,
+                        right: 3,
+                        child: Container(
+                          width: 20,
+                          height: 20,
+                          decoration: BoxDecoration(
+                            color: colorScheme.primaryContainer,
+                            shape: BoxShape.circle,
+                          ),
+                          child: Icon(
+                            FluentIcons.heart_24_filled,
+                            size: 11,
+                            color: colorScheme.onPrimaryContainer,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
               ),
+              errorWidget: (context, url, error) =>
+                  NullArtworkWidget(iconSize: 30, size: size),
             ),
-            errorWidget: (context, url, error) =>
-                NullArtworkWidget(iconSize: 30, size: size),
-          ),
           if (isDurationAvailable && !isOffline)
             Positioned(
               bottom: 4,

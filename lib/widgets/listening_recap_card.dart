@@ -153,10 +153,11 @@ class _RecapBrandHeader extends StatelessWidget {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    ImageIcon(
-                      const AssetImage(_yazhalIconAsset),
-                      size: 16,
-                      color: colorScheme.onSecondaryContainer,
+                    Image.asset(
+                      _yazhalIconAsset,
+                      width: 20,
+                      height: 20,
+                      fit: BoxFit.contain,
                     ),
                     const SizedBox(width: 6),
                     Text(
